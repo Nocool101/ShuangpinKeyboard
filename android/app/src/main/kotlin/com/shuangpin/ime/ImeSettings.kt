@@ -2,6 +2,7 @@ package com.shuangpin.ime
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.shuangpin.engine.AsrProtocol
 
 /**
  * 输入法的全部设置。
@@ -86,12 +87,29 @@ class ImeSettings(context: Context) {
     /**
      * 语音识别接口地址。
      *
-     * - 兼容 OpenAI 风格：`.../v1/audio/transcriptions`（multipart 上传 wav）
-     * - 其它地址走通用 JSON：base64 音频 + sample_rate
+     * 要填**语音识别**接口，不是大模型对话接口——填错的话对方回 404。
+     *
+     * - OpenAI 兼容：`.../v1/audio/transcriptions`
+     * - MiniMax：`https://api.minimax.cn/v1/speech_to_text`
      */
     var asrEndpoint: String
         get() = prefs.getString(KEY_ASR_ENDPOINT, "") ?: ""
         set(v) = prefs.edit().putString(KEY_ASR_ENDPOINT, v.trim()).apply()
+
+    /**
+     * 语音识别的接口形态。
+     *
+     * - `multipart`：OpenAI 兼容与 MiniMax 都是这个（字段 `model` + `file`）
+     * - `json`：通用 JSON，base64 音频 + `sample_rate`
+     * - `auto`：按地址自动判断（老配置用的默认，够用但不精确）
+     *
+     * 为什么要有它：**MiniMax 的形状跟 OpenAI 一模一样，只是路径不同**
+     * （`/v1/speech_to_text` 而不是 `/v1/audio/transcriptions`）。
+     * 靠地址猜会把 MiniMax 误判成 JSON 模式，发过去对方直接 400。
+     */
+    var asrProtocol: String
+        get() = prefs.getString(KEY_ASR_PROTOCOL, AsrProtocol.PROTOCOL_AUTO) ?: AsrProtocol.PROTOCOL_AUTO
+        set(v) = prefs.edit().putString(KEY_ASR_PROTOCOL, v).apply()
 
     /** ASR 模型名。 */
     var asrModel: String
@@ -168,6 +186,7 @@ class ImeSettings(context: Context) {
 
         const val KEY_ASR_ENABLED = "asr.enabled"
         const val KEY_ASR_ENDPOINT = "asr.endpoint"
+        const val KEY_ASR_PROTOCOL = "asr.protocol"
         const val KEY_ASR_MODEL = "asr.model"
         const val KEY_ASR_API_KEY = "asr.apiKey"
         const val KEY_ASR_LANGUAGE = "asr.language"

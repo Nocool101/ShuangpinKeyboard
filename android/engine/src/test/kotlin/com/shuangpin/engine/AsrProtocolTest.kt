@@ -89,6 +89,64 @@ class AsrProtocolTest {
     }
 
     // ---------------------------------------------------------------
+    // 上传方式的选择
+    // ---------------------------------------------------------------
+
+    @Test
+    fun `显式协议说了算`() {
+        assertEquals(
+            AsrProtocol.Upload.MULTIPART,
+            AsrProtocol.uploadFor(AsrProtocol.PROTOCOL_MULTIPART, "随便什么地址"),
+        )
+        assertEquals(
+            AsrProtocol.Upload.JSON,
+            AsrProtocol.uploadFor(AsrProtocol.PROTOCOL_JSON, "https://x/v1/audio/transcriptions"),
+        )
+    }
+
+    @Test
+    fun `auto 模式按地址判断`() {
+        assertEquals(
+            AsrProtocol.Upload.MULTIPART,
+            AsrProtocol.uploadFor(AsrProtocol.PROTOCOL_AUTO, "https://api.openai.com/v1/audio/transcriptions"),
+        )
+        assertEquals(
+            AsrProtocol.Upload.JSON,
+            AsrProtocol.uploadFor(AsrProtocol.PROTOCOL_AUTO, "https://example.com/asr"),
+        )
+    }
+
+    @Test
+    fun `MiniMax 必须走 multipart`() {
+        // 踩过的坑：MiniMax 的形状跟 OpenAI 一样（multipart），只是路径是
+        // /v1/speech_to_text。靠地址猜协议会把它判成 JSON → 对方回 400。
+        assertEquals(
+            AsrProtocol.Upload.MULTIPART,
+            AsrProtocol.uploadFor(
+                AsrProtocol.PROTOCOL_MULTIPART,
+                "https://api.minimax.cn/v1/speech_to_text",
+            ),
+        )
+        // auto 模式下它确实会被猜错——这正是要显式指定服务商的理由
+        assertEquals(
+            AsrProtocol.Upload.JSON,
+            AsrProtocol.uploadFor(
+                AsrProtocol.PROTOCOL_AUTO,
+                "https://api.minimax.cn/v1/speech_to_text",
+            ),
+        )
+    }
+
+    @Test
+    fun `静音 wav 能用来做连通性自检`() {
+        val wav = AsrProtocol.silenceWav(0.5, 16000)
+        // 0.5 秒 × 16000 采样 × 2 字节
+        assertEquals(44 + 16000, wav.size)
+        assertEquals("RIFF", String(wav, 0, 4, Charsets.ISO_8859_1))
+        assertEquals("WAVE", String(wav, 8, 4, Charsets.ISO_8859_1))
+    }
+
+    // ---------------------------------------------------------------
 
     private fun leInt(b: ByteArray, off: Int): Int =
         (b[off].toInt() and 0xFF) or

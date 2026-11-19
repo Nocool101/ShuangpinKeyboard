@@ -1147,6 +1147,7 @@ class ShuangpinImeService : InputMethodService() {
             model = s.asrModel,
             apiKey = s.asrApiKey,
             language = s.asrLanguage,
+            protocol = s.asrProtocol,
         )
         voice?.start(cfg)
     }

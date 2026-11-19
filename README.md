@@ -354,10 +354,28 @@ adb shell am broadcast -n com.shuangpin.ime/.ConfigureReceiver -a com.shuangpin.
 
 | | |
 |---|---|
-| 接口 | 设置里填**端点 + 模型名 + API Key**;兼容 OpenAI 的 `/v1/audio/transcriptions`(multipart 上传 wav)和通用 JSON(base64 音频 + sample_rate)两种 |
+| 接口 | 设置里选**识别服务商** + 填**端点 + 模型名 + API Key**;有**测试按钮** |
 | 录音 | 16 kHz / 单声道 / PCM16,录音期间自动静掉音乐和系统音(不然喇叭的声音会被麦收进去变成回声) |
 | 权限 | `RECORD_AUDIO`(危险权限,在设置页点一下授予) |
 | 失败 | 没说够长 / 接口不通 / 没权限 → 一律提示一句,输入法照常用 |
+
+**识别服务商**(设置页里选,选完地址和模型名自动填好):
+
+| 选项 | 接口地址 | 模型名 | 上传方式 |
+|---|---|---|---|
+| **OpenAI 兼容** | `https://…/v1/audio/transcriptions` | `whisper-1` 等 | multipart(`file` + `model`) |
+| **MiniMax** | `https://api.minimax.cn/v1/speech_to_text` | `asr-1.0` | multipart(`file` + `model`) |
+| **通用 JSON** | 自己的服务 | 随意 | base64 音频 + `sample_rate` |
+
+> ⚠️ **「识别接口地址」填的不是大模型对话地址**——填错对方会回 404。
+> 大模型地址在上面的「云端大模型」区,两个区各填各的。
+>
+> MiniMax 的语音识别是 `/v1/speech_to_text`,**不是** `/v1/audio/transcriptions`
+> (后者会 404)。但它跟 OpenAI 的**形状完全一样**(都是 multipart、字段同为
+> `model` + `file`),只是路径不同——所以不能靠地址猜协议,得让用户选。
+
+**测试按钮**:发一段 0.5 秒静音过去,对方回 200 就说明地址/key/模型名都对
+(没说话所以没文字,这是正常的)。不用真的录一段音来试。
 
 > 没有真 ASR 账号时,可以用仓库里的 `tools/mock_asr.mjs` 起一个假的:
 > `node tools\mock_asr.mjs --port 8790`,设置里填 `http://<你的IP>:8790/v1/audio/transcriptions`。
@@ -402,7 +420,7 @@ adb shell am broadcast -n com.shuangpin.ime/.ConfigureReceiver -a com.shuangpin.
 |---|---|
 | **云端大模型** | 开关、连接方式(自建服务 / 直连厂商)、服务地址、**模型名**、API Key、温度、测试连接按钮 |
 | **端侧重排** | 要不要用本地 8M 模型(不联网) |
-| **语音输入** | 开关、识别接口地址、模型名、API Key、语言、申请录音权限 |
+| **语音输入** | 开关、识别服务商、识别接口地址、模型名、API Key、语言、**测试按钮**、申请录音权限 |
 | **自动纠错** | 开关、仅提示还是直接改正 |
 
 **两种连接方式**:
@@ -842,6 +860,41 @@ JVM 基线(`DictionaryLoadBenchmark` 自动测),安卓 ART 同量级:
     **候选栏高度没变**:38dp 恒定,键位一根手指都没挪。
     真机截图确认:候选栏现在是「你好 | 拟好 | 你好吗 | 你好啊 | 1/6」,
     页码直接贴在最右端。
+
+---
+
+### 22 · 语音识别用不了:根因是两层的(用户报的)
+
+    症状:按住空格说话,弹「识别失败:接口返回 404:404 page not found」。
+
+    **根因一(配置)**:「识别接口地址」填成了 `https://api.minimax.cn/anthropic`
+    ——那是**大模型对话接口**,不是语音识别接口。
+    模型名也填错了:`MiniMax-M3.1-Flash` 是对话模型,ASR 要 `asr-1.0`。
+
+    **根因二(代码)**:即使把地址改对成 `https://api.minimax.cn/v1/speech_to_text`,
+    原来的代码**照样失败**(实测报 400)。因为它靠
+    `path.contains("audio/transcriptions")` 猜上传方式:
+    - MiniMax 的形状跟 OpenAI **完全一样**(multipart,字段同为 `model` + `file`)
+    - 只是**路径不同**(`/v1/speech_to_text`)
+    → 地址里没有 `audio/transcriptions` → 被判成 JSON(base64)模式 → 对方回 400
+
+    **不能靠地址猜协议**。改成设置页里显式选「识别服务商」
+    (OpenAI 兼容 / MiniMax / 通用 JSON),选完地址和模型名自动填好。
+
+    **配套加的东西**
+    - **测试按钮**:发一段 0.5 秒静音过去,回 200 就说明地址/key/模型名都对。
+      以前语音区**没有**测试按钮(云端大模型有),填错了只能等到真说话时才发现。
+    - **错误提示带修复建议**:404 →「接口地址不对(语音识别地址不是大模型对话地址)」,
+      401/403 →「API Key 不对」,400 →「请求格式不对,检查服务商选对了没」。
+    - 老配置自动归位:地址含 `speech_to_text` 的自动切到 MiniMax 预设。
+
+    **排查用的回路**(`D:\tmp\voice-e2e\voice_e2e.ps1`,诊断用,不进仓库):
+    假 ASR 收到请求 = 手势/录音/上传都通;输入框出现识别文本 = 解析/上屏也通。
+    靠这个信号把问题定位到「网络前」还是「网络后」——
+    一开始就靠肉眼看 Toast,方向全靠猜,绕了远路。
+
+    **实测**:MiniMax 正确端点 `POST /v1/speech_to_text` + `model=asr-1.0` + multipart
+    → 200 `{"text":"你好，这是一次测试。"}`;真机测试按钮 → 「连接正常:地址、key、模型名都对」。
 
 ---
 

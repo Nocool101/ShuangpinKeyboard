@@ -21,8 +21,11 @@ import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import com.shuangpin.engine.AsrProtocol
 import com.shuangpin.engine.LexemeClient
 import com.shuangpin.engine.LexemeRequest
+import com.shuangpin.ime.voice.AsrConfig
+import com.shuangpin.ime.voice.HttpAsrEngine
 
 /**
  * 输入法设置。
@@ -317,14 +320,41 @@ class SettingsActivity : Activity() {
                 settings.voiceEnabled,
             ) { settings.voiceEnabled = it }
         )
+
+        // 老配置是按地址猜上传方式的。地址是 MiniMax 的 speech_to_text 时，
+        // 说明它本来就该走 multipart —— 直接归位，省得用户再填一遍。
+        if (settings.asrProtocol == AsrProtocol.PROTOCOL_AUTO &&
+            settings.asrEndpoint.contains("speech_to_text")
+        ) {
+            settings.asrProtocol = AsrProtocol.PROTOCOL_MULTIPART
+        }
+
         root.addView(
-            hint(
-                "接口兼容 OpenAI 的 /v1/audio/transcriptions（multipart 上传 wav），\n" +
-                    "也兼容通用 JSON（base64 音频 + sample_rate）。"
-            )
+            TextView(this).apply {
+                text = "识别服务商"
+                textSize = 14f
+                setTextColor(Color.parseColor("#5B6472"))
+                setPadding(0, dp(10), 0, 0)
+            }
         )
-        val endpoint = textRow(root, "识别接口地址", settings.asrEndpoint, "https://…/v1/audio/transcriptions")
-            .also { asrEndpoint = it }
+        root.addView(hint(ASR_PRESET_HINT))
+
+        val group = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val radios = ASR_PRESETS.map { preset ->
+            RadioButton(this).apply {
+                text = preset.label
+                isChecked = preset.protocol == settings.asrProtocol
+                tag = preset
+            }.also { group.addView(it) }
+        }
+        root.addView(group)
+
+        val endpoint = textRow(
+            root,
+            "识别接口地址",
+            settings.asrEndpoint,
+            "https://…/v1/audio/transcriptions",
+        ).also { asrEndpoint = it }
         val model = textRow(root, "识别模型名", settings.asrModel, "例如 whisper-1 / paraformer")
             .also { asrModel = it }
         val apiKey = textRow(root, "API Key", settings.asrApiKey, "没有就留空", password = true)
@@ -332,6 +362,30 @@ class SettingsActivity : Activity() {
         val language = textRow(root, "语言", settings.asrLanguage, "zh")
             .also { asrLanguage = it }
 
+        // 换服务商：地址和模型名跟着换成对应的默认��。
+        // 只在「当前值还是空白或某个预设的默认值」时才改——
+        // 用户自己填的地址不能被覆盖掉。
+        group.setOnCheckedChangeListener { _, id ->
+            val preset = radios.firstOrNull { it.id == id }?.tag as? AsrPreset ?: return@setOnCheckedChangeListener
+            settings.asrProtocol = preset.protocol
+            val cur = settings.asrEndpoint
+            if (cur.isBlank() || ASR_PRESETS.any { it.endpoint == cur }) {
+                settings.asrEndpoint = preset.endpoint
+                settings.asrModel = preset.model
+                endpoint.setText(preset.endpoint)
+                model.setText(preset.model)
+            }
+        }
+
+        root.addView(
+            Button(this).apply {
+                text = "测试语音识别接口"
+                setOnClickListener {
+                    save()
+                    testAsr()
+                }
+            }
+        )
         root.addView(
             Button(this).apply {
                 text = "保存语音配置并申请录音权限"
@@ -351,6 +405,36 @@ class SettingsActivity : Activity() {
             }
         )
         updatePermState()
+    }
+
+    /**
+     * 连通性自检：发一段 0.5 秒静音过去。
+     *
+     * 对方回 200 就说明地址、key、模型名都对——只是没说话所以没有文字。
+     * 不用真的录一段音来测。
+     */
+    private fun testAsr() {
+        val cfg = AsrConfig(
+            endpoint = settings.asrEndpoint,
+            model = settings.asrModel,
+            apiKey = settings.asrApiKey,
+            language = settings.asrLanguage,
+            protocol = settings.asrProtocol,
+        )
+        if (!cfg.isUsable) {
+            Toast.makeText(this, "先填识别接口地址", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Toast.makeText(this, "正在测试…", Toast.LENGTH_SHORT).show()
+        HttpAsrEngine(cfg) { }.testConnection { error ->
+            runOnUiThread {
+                if (error == null) {
+                    Toast.makeText(this, "连接正常：地址、key、模型名都对", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, "连不上：$error", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     /** 自动纠错。 */
@@ -599,5 +683,38 @@ class SettingsActivity : Activity() {
 
     companion object {
         private const val REQ_MIC = 1001
+
+        /**
+         * 语音识别的服务商预设。
+         *
+         * @param protocol 上传方式（`multipart` / `json` / `auto`）
+         * @param endpoint 选它时自动填的地址；空 = 让用户自己填
+         * @param model 选它时自动填的模型名
+         */
+        data class AsrPreset(
+            val label: String,
+            val protocol: String,
+            val endpoint: String,
+            val model: String,
+        )
+
+        /**
+         * 三个预设。
+         *
+         * **MiniMax 必须单独列出来**：它的形状跟 OpenAI 一样（multipart），
+         * 只是路径是 `/v1/speech_to_text` 而不是 `/v1/audio/transcriptions`。
+         * 靠地址猜协议会把 MiniMax 判成 JSON 模式，对方直接回 400。
+         */
+        private val ASR_PRESETS = listOf(
+            AsrPreset("OpenAI 兼容（…/v1/audio/transcriptions）", AsrProtocol.PROTOCOL_AUTO, "", ""),
+            AsrPreset("MiniMax（api.minimax.cn/v1/speech_to_text）", AsrProtocol.PROTOCOL_MULTIPART,
+                "https://api.minimax.cn/v1/speech_to_text", "asr-1.0"),
+            AsrPreset("通用 JSON（base64 + sample_rate）", AsrProtocol.PROTOCOL_JSON, "", ""),
+        )
+
+        private const val ASR_PRESET_HINT =
+            "语音识别用的是**另一个接口**，不是上面那个大模型地址。填错地址对方会回 404：\n" +
+                "· OpenAI 兼容：https://…/v1/audio/transcriptions\n" +
+                "· MiniMax：https://api.minimax.cn/v1/speech_to_text（模型 asr-1.0）"
     }
 }

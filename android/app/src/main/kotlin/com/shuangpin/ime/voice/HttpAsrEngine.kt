@@ -68,7 +68,7 @@ class HttpAsrEngine(
         }
         Thread({
             try {
-                val text = if (isOpenAiStyle(config.endpoint)) uploadMultipart(audio) else uploadJson(audio)
+                val text = upload(audio)
                 if (cancelled) return@Thread
                 if (text.isNullOrBlank()) {
                     onResult(AsrResult(error = "接口没有返回文字"))
@@ -83,13 +83,37 @@ class HttpAsrEngine(
         }, "shuangpin-asr").apply { isDaemon = true }.start()
     }
 
+    /** 按配置选一种上传方式发出去。 */
+    private fun upload(audio: ByteArray): String? =
+        when (AsrProtocol.uploadFor(config.protocol, config.endpoint)) {
+            AsrProtocol.Upload.MULTIPART -> uploadMultipart(audio)
+            AsrProtocol.Upload.JSON -> uploadJson(audio)
+        }
+
+    /**
+     * 连通性自检：发一段 0.5 秒静音过去。
+     *
+     * 对方回 200 就说明**地址、key、模型名都对**，只是没说话所以没文字。
+     * 不用真的去录一段音来测。
+     *
+     * @param onDone 收到 null = 连通了；收到字符串 = 不通的原因
+     */
+    fun testConnection(onDone: (String?) -> Unit) {
+        Thread({
+            val silence = AsrProtocol.silenceWav()
+            try {
+                upload(silence)
+                onDone(null)
+            } catch (t: Throwable) {
+                onDone(t.message ?: t.javaClass.simpleName)
+            }
+        }, "shuangpin-asr-test").apply { isDaemon = true }.start()
+    }
+
     override fun cancel() {
         cancelled = true
         synchronized(buffer) { buffer.reset() }
     }
-
-    private fun isOpenAiStyle(path: String): Boolean =
-        path.contains("audio/transcriptions")
 
     // ------------------------------------------------------------------
     // 两种上传方式
@@ -174,7 +198,14 @@ class HttpAsrEngine(
             ""
         }
         if (code !in 200..299) {
-            throw IllegalStateException("接口返回 $code：${body.take(120)}")
+            // 这几个码几乎都��「填错了」而不是「服务坏了」，直接告诉用户怎么改
+            val hint = when (code) {
+                404 -> "——接口地址不对（语音识别地址不是大模型对话地址）"
+                401, 403 -> "——API Key 不对"
+                400 -> "——请求格式不对，检查「服务商」选对了没"
+                else -> ""
+            }
+            throw IllegalStateException("接口返回 $code：${body.take(120)}$hint")
         }
         return parseText(body)
     }
@@ -198,7 +229,7 @@ class HttpAsrEngine(
 }
 
 /**
- * 语音识别的配置（端点、模型、key、语言）。
+ * 语音识别的配置（端点、模型、key、语言、协议）。
  *
  * 用户在设置页里填；这里只做搬运。
  */
@@ -207,6 +238,13 @@ data class AsrConfig(
     val model: String,
     val apiKey: String,
     val language: String,
+    /**
+     * 接口形态：`multipart` / `json` / `auto`。
+     *
+     * **不能省**：MiniMax 的形状跟 OpenAI 一样（multipart），只是路径是
+     * `/v1/speech_to_text`。靠地址猜协议会把 MiniMax 误判成 JSON，对方回 400。
+     */
+    val protocol: String = AsrProtocol.PROTOCOL_AUTO,
 ) {
     /** 能不能用。 */
     val isUsable: Boolean get() = endpoint.isNotBlank()
