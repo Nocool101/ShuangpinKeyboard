@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      品牌色。与 App 图标（tools/make_icon.ps1）用的是同一套值，
+      改一处要记得改另一处。
+    -->
+    <color name="brand">#2F6DF6</color>
+    <color name="brand_dark">#1640B4</color>
+    <color name="brand_light">#3D7BFF</color>
+</resources>

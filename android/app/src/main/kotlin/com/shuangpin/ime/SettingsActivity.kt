@@ -4,13 +4,16 @@ import android.app.Activity
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -60,21 +63,41 @@ class SettingsActivity : Activity() {
     // ------------------------------------------------------------------
 
     private fun buildUi(): View {
-        val scroll = ScrollView(this)
+        // 外层：蓝色头部 + 可滚动的设置内容
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#FFFFFF"))
+        }
+
+        val header = buildHeader()
+        outer.addView(header)
+
+        val scroll = ScrollView(this).apply {
+            // 挂载的瞬间，系统会把焦点给第一个可聚焦的子 View（第一个 EditText），
+            // ScrollView 随即滚到那儿去。
+            // FOCUS_BEFORE_DESCENDANTS 让焦点先落在 ScrollView 自己身上，
+            // 输入框要用户点了才获得焦点。
+            descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
+            isFocusableInTouchMode = true
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(32))
+            setPadding(dp(16), dp(12), dp(16), dp(32))
+            isFocusableInTouchMode = true
         }
         scroll.addView(root)
+        scroll.post { scroll.requestFocus() }
 
+        // ---- 设置内容（在可滚动区里）----
         root.addView(
             TextView(this).apply {
-                text = "双拼输入法 · 设置"
-                textSize = 20f
-                setTextColor(Color.parseColor("#171B23"))
-                setPadding(0, 0, 0, dp(16))
+                text = "启用方法：系统设置 → 语言和输入法 → 虚拟键盘 → 启用并切换到「双拼输入法」。" +
+                    "调不出键盘时，长按地球键也能进这一屏。"
+                textSize = 13f
+                setTextColor(Color.parseColor("#5B6472"))
             }
         )
+        root.addView(divider())
 
         buildCloudSection(root)
         root.addView(divider())
@@ -95,7 +118,103 @@ class SettingsActivity : Activity() {
                 }
             }
         )
-        return scroll
+
+        outer.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            ),
+        )
+
+        applyInsets(outer, header)
+        return outer
+    }
+
+    /**
+     * 处理状态栏内边距。
+     *
+     * targetSdk 36 在 Android 15+ 上**强制 edge-to-edge**：窗口铺满全屏，
+     * 内容不再自动避开状态栏。所以自己补这段留白。
+     *
+     * Android 10 及以下没有强制 edge-to-edge，窗口本来就避开状态栏，
+     * 那时候不能再加一遍（否则头部会多出一截空白）。
+     */
+    private fun applyInsets(outer: View, header: View) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        }
+        outer.setOnApplyWindowInsetsListener { _, insets ->
+            val top = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                insets.getInsets(WindowInsets.Type.statusBars()).top
+            } else {
+                @Suppress("DEPRECATION")
+                insets.systemWindowInsetTop
+            }
+            header.setPadding(
+                header.paddingLeft,
+                top + dp(16),
+                header.paddingRight,
+                dp(16),
+            )
+            insets
+        }
+        outer.requestApplyInsets()
+    }
+
+    /**
+     * 蓝色头部：图标 + 名字 + 一句话介绍。
+     *
+     * 这一屏现在是**桌面图标点进来的唯一落点**（候选栏里已经没有「设置」按钮了），
+     * 所以得把「这个 App 是什么」讲清楚。
+     */
+    private fun buildHeader(): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.bg_app_header)
+        }
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val icon = ImageView(this).apply {
+            setImageResource(R.mipmap.ic_launcher)
+            layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)).also {
+                it.rightMargin = dp(12)
+            }
+        }
+        row.addView(icon)
+
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        titles.addView(
+            TextView(this).apply {
+                text = "双拼输入法"
+                textSize = 20f
+                setTextColor(Color.WHITE)
+            }
+        )
+        titles.addView(
+            TextView(this).apply {
+                text = "双层标签 · 歧义预消解"
+                textSize = 13f
+                setTextColor(0xCCFFFFFF.toInt())
+            }
+        )
+        row.addView(titles)
+        box.addView(row)
+
+        box.addView(
+            TextView(this).apply {
+                text = "26 键常驻，声母位/韵母位只换标签不换布局；" +
+                    "声母一定，合法韵母就唯一，9 个天生歧义的键不用盲赌。"
+                textSize = 13f
+                setTextColor(0xE6FFFFFF.toInt())
+                setPadding(0, dp(12), 0, 0)
+            }
+        )
+        return box
     }
 
     /** 云端大模型：联想 / 消歧 / 纠错都用它。 */
@@ -451,16 +570,21 @@ class SettingsActivity : Activity() {
             }
         )
         val et = EditText(this).apply {
-            setText(value)
-            this.hint = placeholder
-            textSize = 15f
-            setTextColor(Color.parseColor("#171B23"))
+            // 顺序有讲究，三步都不能换：
+            //   ① setSingleLine() —— 它内部会把输入类型重写成 SINGLE_LINE
+            //   ② inputType      —— 放在 setSingleLine 之后，否则密码变「可见密码」
+            //   ③ setText()      —— 放在 inputType 之后，否则掩码套不到已有文本上
+            // 曾经把 setText 放在最前面，结果 API Key 以明文显示在屏幕上（真机截图抓到过）。
+            setSingleLine()
             inputType = if (password) {
                 InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             } else {
                 InputType.TYPE_CLASS_TEXT
             }
-            setSingleLine()
+            setText(value)
+            this.hint = placeholder
+            textSize = 15f
+            setTextColor(Color.parseColor("#171B23"))
         }
         parent.addView(
             et,

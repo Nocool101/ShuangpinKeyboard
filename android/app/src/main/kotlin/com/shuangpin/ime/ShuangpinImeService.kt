@@ -8,7 +8,6 @@ import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.KeyEvent
-import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -308,26 +307,12 @@ class ShuangpinImeService : InputMethodService() {
             LinearLayout.LayoutParams(dp(PAGE_INDICATOR_DP).toInt(), LinearLayout.LayoutParams.MATCH_PARENT),
         )
 
-        // 「设置」按钮——**必须显眼**。
+        // 候选栏里**不再放「设置」按钮**了。
         //
-        // 只在 manifest 里声明 `android.settingsActivity` 是不够的：
-        // 那条路要用户自己进「系统设置 → 语言和输入法 → 键盘 → 设置」才找得到，
-        // 十个用户九个找不到。键盘上必须有一个能直接点的入口。
-        //
-        // 放在候选栏最右边（页码之后）：候选的起始位置不动，
-        // 键位更是一根手指都没挪——候选栏高度恒定 38dp，键盘不会上下漂。
-        val settingsBtn = TextView(this).apply {
-            text = "设置"
-            textSize = 12f
-            setTextColor(0xFF5B6472.toInt())
-            gravity = Gravity.CENTER
-            setPadding(dp(4f).toInt(), 0, dp(4f).toInt(), 0)
-            setOnClickListener { openSettings() }
-        }
-        row.addView(
-            settingsBtn,
-            LinearLayout.LayoutParams(dp(SETTINGS_BTN_DP).toInt(), LinearLayout.LayoutParams.MATCH_PARENT),
-        )
+        // 以前放这儿是因为「系统设置 → 语言和输入法 → 键盘 → 设置」那条路太深，
+        // 十个用户九个找不到。现在 App 有桌面图标了，设置就在图标里：
+        // 点一下图标进设置页，要比在候选栏里挤一个 40dp 的按钮干净得多——
+        // 候选栏右侧的页码也能离候选更近一点。
 
         root.addView(
             row,
@@ -1442,14 +1427,6 @@ class ShuangpinImeService : InputMethodService() {
          * 页码的固定宽度（dp）。固定宽度，避免页码出现/消失时横滑区宽度突变。
          */
         const val PAGE_INDICATOR_DP = 42f
-
-        /**
-         * 「设置」按钮的宽度（dp）。
-         *
-         * 放在候选栏最右端，**不占候选的位置**——
-         * 候选还是从最左边开始，用户的肌肉记忆不受影响。
-         */
-        const val SETTINGS_BTN_DP = 40f
 
         /**
          * 取多少字的上文交给重排模型。

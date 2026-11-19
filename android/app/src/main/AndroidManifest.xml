@@ -21,6 +21,8 @@
     -->
     <application
         android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
@@ -38,16 +40,25 @@
         </receiver>
 
         <!--
-          设置页。
+          设置页。它同时是**桌面图标入口**和系统的输入法设置入口。
+
           exported 必须 true：系统的输入法设置（长按地球键 → 设置）是从别的 App
           拉起它的，exported=false 会被系统拦下来。
-          没有 intent-filter，所以只能被显式启动。
+
+          桌面图标（MAIN/LAUNCHER）进来后看到的就是这一屏——
+          候选栏里不再放「设置」按钮了，入口统一在这里。
         -->
         <activity
             android:name=".SettingsActivity"
             android:exported="true"
-            android:label="@string/settings_name"
-            android:theme="@android:style/Theme.Material.Light" />
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/app_name"
+            android:theme="@style/SettingsTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <!--
           输入法服务。exported 必须为 true（Android 12+ 强制），

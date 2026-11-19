@@ -13,4 +13,21 @@
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+
+    <!--
+      设置页（也就是桌面图标点进来那一屏）的主题。
+
+      用 NoActionBar：头部是自绘的蓝色带（见 SettingsActivity.buildHeader），
+      不要框架的 ActionBar——targetSdk 36 在 Android 15+ 上强制 edge-to-edge，
+      框架 ActionBar 会变成覆盖层盖住内容（真机截图抓过：图标被压在蓝色条底下）。
+      状态栏留白由 applyInsets() 自己处理。
+    -->
+    <style name="SettingsTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">@color/brand</item>
+        <item name="android:colorPrimaryDark">@color/brand_dark</item>
+        <item name="android:colorAccent">@color/brand</item>
+        <item name="android:statusBarColor">@color/brand_dark</item>
+        <!-- 进这一屏不该自动弹出软键盘 -->
+        <item name="android:windowSoftInputMode">stateHidden|adjustResize</item>
+    </style>
 </resources>
