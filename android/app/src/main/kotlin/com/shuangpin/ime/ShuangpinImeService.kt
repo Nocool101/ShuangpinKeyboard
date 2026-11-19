@@ -7,11 +7,13 @@ import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -47,6 +49,9 @@ class ShuangpinImeService : InputMethodService() {
     /** 候选栏右侧的页码（"1/3"）。 */
     private var candidateIndicator: TextView? = null
 
+    /** 候选栏那一行（横滑区 + 页码）。单手模式靠它加内边距把整行挪到一侧。 */
+    private var candidateRow: LinearLayout? = null
+
     /**
      * 上一次渲染的候选内容签名。
      *
@@ -54,6 +59,17 @@ class ShuangpinImeService : InputMethodService() {
      * 每次按键都 `removeAllViews` 重建一遍会明显掉帧。
      */
     private var lastCandidateSig: String? = null
+
+    /**
+     * 本会话每次上屏的**长度**（按上屏先后）。
+     *
+     * 用来做「上滑退一格」——退的时候按**词/句**退，而不是一个字一个字退。
+     *
+     * 用户反馈「打一段话不能修改之前的文字，只能修改最后一个字」：
+     * 一次删一个字，想改中间那个错字就得把后面的一起删光重打。
+     * 按词退的话，退两次就到那儿了。
+     */
+    private val committedUnits = ArrayDeque<Int>()
 
     /**
      * 上一次渲染时的拼音串。
@@ -242,6 +258,42 @@ class ShuangpinImeService : InputMethodService() {
     }
 
     // ------------------------------------------------------------------
+    // 键盘形态（单手 / 全键盘）
+    // ------------------------------------------------------------------
+
+    /** 当前键盘形态。从设置读，改了设置下次弹键盘就生效。 */
+    private fun keyLayout(): ShuangpinKeyboardView.Layout = when (settings?.keyLayout) {
+        ImeSettings.KEY_LAYOUT_FULL -> ShuangpinKeyboardView.Layout.FULL
+        ImeSettings.KEY_LAYOUT_LEFT -> ShuangpinKeyboardView.Layout.LEFT
+        else -> ShuangpinKeyboardView.Layout.RIGHT
+    }
+
+    /**
+     * 把键盘形态应用到键盘和候选栏。
+     *
+     * **候选栏必须跟着键盘收窄到同一侧**——
+     * 键盘在右边、候选栏还横跨全屏的话，最顺手的那几个候选反而够不着，
+     * 等于单手模式白做。
+     */
+    private fun applyKeyLayout() {
+        val l = keyLayout()
+        keyboard?.layout = l
+        val row = candidateRow ?: return
+        if (l == ShuangpinKeyboardView.Layout.FULL) {
+            row.setPadding(0, 0, 0, 0)
+            return
+        }
+        // 留白区那一侧加内边距，候选栏就缩到跟键盘同一侧了
+        val dead = (resources.displayMetrics.widthPixels *
+            (1f - ShuangpinKeyboardView.ONE_HAND_WIDTH_RATIO)).toInt()
+        if (l == ShuangpinKeyboardView.Layout.RIGHT) {
+            row.setPadding(dead, 0, 0, 0)
+        } else {
+            row.setPadding(0, 0, dead, 0)
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 输入视图
     // ------------------------------------------------------------------
 
@@ -314,6 +366,11 @@ class ShuangpinImeService : InputMethodService() {
         // 点一下图标进设置页，要比在候选栏里挤一个 40dp 的按钮干净得多——
         // 候选栏右侧的页码也能离候选更近一点。
 
+        // 单手模式：候选栏跟着键盘收窄到同一侧——
+        // 键盘在右边、候选栏还横跨全屏的话，最顺手的那几个候选反而够不着。
+        candidateRow = row
+        applyKeyLayout()
+
         root.addView(
             row,
             LinearLayout.LayoutParams(
@@ -324,9 +381,17 @@ class ShuangpinImeService : InputMethodService() {
 
         val kb = ShuangpinKeyboardView(this)
         kb.bind(session, engine)
+        // 键盘形态：单手右手 / 单手左手 / 全键盘。
+        // 跟候选栏一起收窄到同一侧（applyKeyLayout 里一并做）。
+        kb.layout = keyLayout()
+        applyKeyLayout()
         kb.listener = object : ShuangpinKeyboardView.Listener {
             override fun onPinyinKey(key: String) {
                 session.pressKey(key)
+                // 新一轮输入：逐字修改的结果作废（候选全变了，改了也没意义）
+                charEdits.clear()
+                editingSyllable = null
+                editBase = null
                 // 新一轮输入开始了：上一轮的下一词建议跟这轮没关系，
                 // 留着只会挤占候选栏，还会让人以为那些词是这一轮的候选。
                 resetLexeme()
@@ -345,6 +410,10 @@ class ShuangpinImeService : InputMethodService() {
 
             override fun onSpace() {
                 onSpacePressed()
+            }
+
+            override fun onConfirm() {
+                onConfirmPressed()
             }
 
             override fun onBackspace() {
@@ -438,6 +507,7 @@ class ShuangpinImeService : InputMethodService() {
         session.clear()
         undoStack.clear()
         committedText.clear()
+        committedUnits.clear()
         // 换了一个输入框：上一处的联想一个字都不该带过来
         resetLexeme()
 
@@ -465,7 +535,32 @@ class ShuangpinImeService : InputMethodService() {
         super.onStartInputView(info, restarting)
         applyWindowHeight()
         applySoftInputMode()
+        // 设置里改了键盘形态的话，这次弹键盘就生效
+        // （输入法服务是常驻的，不会因为改设置而重建）。
+        applyKeyLayout()
+        // 每次弹键盘都回到**中文输入**模式——
+        // 用户反馈「弹出键盘要在中文输入法界面，不要在上次选择的地方」。
+        // （上次停在数字/标点面板的话，再弹出来还是数字面板，
+        //   看着像「键盘坏了」，其实是模式没复位。）
+        if (currentMode != ShuangpinKeyboardView.Mode.CHINESE) {
+            currentMode = ShuangpinKeyboardView.Mode.CHINESE
+            keyboard?.mode = ShuangpinKeyboardView.Mode.CHINESE
+            // rawMode 是从 currentMode 派生的，不用单独改
+        }
+        // 确认键的文案跟着编辑框声明的 action 走（搜索/发送/完成…）
+        keyboard?.confirmLabel = actionLabel(editorAction)
         refresh()
+    }
+
+    /** 编辑框声明的 action 对应的按键文案。 */
+    private fun actionLabel(action: Int): String = when (action) {
+        EditorInfo.IME_ACTION_SEARCH -> "搜索"
+        EditorInfo.IME_ACTION_SEND -> "发送"
+        EditorInfo.IME_ACTION_DONE -> "完成"
+        EditorInfo.IME_ACTION_GO -> "前往"
+        EditorInfo.IME_ACTION_NEXT -> "下一个"
+        EditorInfo.IME_ACTION_PREVIOUS -> "上一个"
+        else -> "确认"
     }
 
     /**
@@ -544,6 +639,12 @@ class ShuangpinImeService : InputMethodService() {
             return
         }
 
+        // 「改这个字」模式：候选栏换成那个音节的候选字
+        if (editingSyllable != null) {
+            renderSyllableCandidates()
+            return
+        }
+
         val hasCandidates = session.pending.isNotEmpty()
         // 上屏之后没有预编辑内容了，但**下一词建议还得显示**——
         // 那正是「用户刚打完一个词，接下来可能想打什么」的用处所在。
@@ -572,7 +673,9 @@ class ShuangpinImeService : InputMethodService() {
         val boosted = applyCloudBoost(ordered)
         val withNext = insertNextWords(boosted)
         val withCorrection = insertCorrection(withNext)
-        val sig = session.pinyin + "|" + withCorrection.joinToString("|") { it.text }
+        // 逐字修改的结果最后套上——重排、联想、纠错都不该把它冲掉
+        val finalItems = applyCharEdit(withCorrection)
+        val sig = session.pinyin + "|" + finalItems.joinToString("|") { it.text }
         if (sig == lastCandidateSig) {
             updatePageInfo()
             return
@@ -585,9 +688,9 @@ class ShuangpinImeService : InputMethodService() {
         lastCandidateSig = sig
 
         bar.removeAllViews()
-        withCorrection.forEachIndexed { i, item -> addChip(item, isFirst = i == 0) }
-        // 第一候选 = 空格会上屏的那个
-        topCandidateText = withCorrection.firstOrNull()?.text
+        finalItems.forEachIndexed { i, item -> addChip(item, isFirst = i == 0) }
+        // 第一候选 = 确认键会上屏的那个
+        topCandidateText = finalItems.firstOrNull()?.text
         // 布局完才知道总宽与页数
         bar.post {
             if (newRound) scroll.scrollTo(0, 0)
@@ -689,54 +792,267 @@ class ShuangpinImeService : InputMethodService() {
         return if (text.length > RERANK_CONTEXT_CHARS) text.takeLast(RERANK_CONTEXT_CHARS) else text
     }
 
+    /**
+     * 正在逐字修改的音节序号（null = 不在改）。
+     *
+     * 用户点候选词里某个字上标的拼音，就进入「改这个字」模式：
+     * 候选栏换成那个音节的候选字，选一个就把那个字换掉，其它字不动。
+     */
+    private var editingSyllable: Int? = null
+
+    /**
+     * 正在被改的那个候选（原文）+ 改的是第几个字。
+     */
+    private var editBase: String? = null
+    private var editCharIndex = 0
+
+    /**
+     * 逐字修改的结果：原候选文本 → 改过的文本。
+     *
+     * 改的是**候选词**的字，不是引擎整句的字——
+     * 「智慧」和「只会」是同一串拼音的两种切分，
+     * 用户改的是他看到的那个候选。
+     *
+     * 做成映射而不是一次性替换，是因为**端侧重排是异步的**：
+     * 改完紧接着还会再渲染一次，一次性替换会被冲掉。
+     */
+    private val charEdits = LinkedHashMap<String, String>()
+
+    /**
+     * 把逐字修改的结果套到候选列表上。
+     *
+     * 被改的那条候选**原地替换**——位置不变（用户是从第 3 个点进去的，
+     * 改完它还是第 3 个）。
+     */
+    private fun applyCharEdit(items: List<Candidate>): List<Candidate> {
+        if (charEdits.isEmpty()) return items
+        return items.map { item ->
+            val neu = charEdits[item.text]
+            if (neu != null) item.copy(text = neu) else item
+        }
+    }
+
     private fun addChip(item: Candidate, isFirst: Boolean) {
-        val tv = TextView(this).apply {
-            text = item.text
-            textSize = when (item.kind) {
-                CandidateKind.SENTENCE -> 20f
-                // 纠错候选字号稍大一点：它是最需要被看见的那个
-                CandidateKind.CORRECTION -> 19f
-                CandidateKind.SENTENCE_ALT -> 18f
-                CandidateKind.WORD, CandidateKind.CHAR -> 18f
-                // 扩展候选、下一词建议：字号小一档，视觉上和主候选分开
-                CandidateKind.EXTENSION, CandidateKind.NEXT_WORD -> 17f
-                // 云端整句纠错：一整句话，字号小一档才放得下
-                CandidateKind.CORRECTION_TEXT -> 16f
+        val syllables = session.pending.map { it.syllable ?: "" }
+        // 字数跟音节数一致，才能逐字对上拼音。
+        // 长词扩展（「你好吗」对应 2 个音节）之类对不上，就走老样式。
+        val perChar = if (syllables.isNotEmpty() && syllables.size == item.text.length) syllables else null
+
+        val color = chipTextColor(item, isFirst)
+        val bg = chipBackground(item, isFirst)
+        val size = chipTextSize(item)
+
+        if (perChar == null) {
+            // 对不上拼音 → 老样子，一个 TextView
+            candidateBar?.addView(TextView(this).apply {
+                text = item.text
+                textSize = size
+                setTextColor(color)
+                setPadding(dp(12f).toInt(), dp(4f).toInt(), dp(12f).toInt(), dp(4f).toInt())
+                if (bg != 0) setBackgroundColor(bg)
+                setOnClickListener { commitChip(item) }
+            })
+            return
+        }
+
+        // 逐字版：每个字一格，字**上面**标这个字的拼音。
+        // 点拼音 → 改这个字；点字 → 整条上屏。
+        //
+        // 拼音做成角标叠在上方（跟键面左上角的字母角标同一套视觉语言），
+        // 候选栏高度不用变——一变键盘就上下漂，用户的肌肉记忆就废了。
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6f).toInt(), 0, dp(6f).toInt(), 0)
+            if (bg != 0) setBackgroundColor(bg)
+            setOnClickListener { commitChip(item) }
+        }
+        for ((i, syl) in perChar.withIndex()) {
+            // 单元高度要**明确给**：角标和汉字都是 WRAP_CONTENT，
+            // 高度一样的话 FrameLayout 里一个 TOP 一个 BOTTOM 会完全重叠——
+            // 汉字后添加，压在角标上面，点角标就变成点上屏。
+            val unit = FrameLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    dp(42f).toInt(),
+                )
             }
-            setTextColor(
-                when {
-                    // 第一候选就是「空格会上屏的那个」，用主候选的样式
-                    isFirst -> 0xFFA8620A.toInt()
-                    item.kind == CandidateKind.SENTENCE_ALT -> 0xFF3F4757.toInt()
-                    item.kind == CandidateKind.EXTENSION -> 0xFF5B6472.toInt()
-                    // 下一词建议：蓝色，和本地候选区分开
-                    item.kind == CandidateKind.NEXT_WORD -> 0xFF2F6DF6.toInt()
-                    // 自动纠错（本地拼音容错）：深绿——「这条是帮你改过的」
-                    item.kind == CandidateKind.CORRECTION -> 0xFF0F7B4A.toInt()
-                    // 云端整句纠错：紫红——「这是大模型改的整句」
-                    item.kind == CandidateKind.CORRECTION_TEXT -> 0xFF8E44AD.toInt()
-                    // 云端按上文消歧后提上来的：深蓝，一眼能看出「这个是结合上文挑的」
-                    item.promoted -> 0xFF1F5FBF.toInt()
-                    else -> 0xFF171B23.toInt()
+            unit.addView(
+                TextView(this).apply {
+                    text = syl
+                    textSize = 10f
+                    setTextColor(0xFF8A94A6.toInt())
+                    // 点拼音 = 只改这一个字。角标小，触摸区要留够，
+                    // 不然用户点不准（真机上点一次就上屏了）。
+                    setPadding(dp(3f).toInt(), dp(1f).toInt(), dp(3f).toInt(), dp(1f).toInt())
+                    setOnClickListener { startEditingSyllable(i, item.text) }
+                },
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL },
+            )
+            unit.addView(
+                TextView(this).apply {
+                    text = item.text[i].toString()
+                    textSize = size
+                    setTextColor(color)
+                    gravity = Gravity.CENTER
+                    setOnClickListener { commitChip(item) }
+                },
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL },
+            )
+            box.addView(unit)
+        }
+        candidateBar?.addView(box)
+    }
+
+    /** 候选文字的颜色。 */
+    private fun chipTextColor(item: Candidate, isFirst: Boolean): Int = when {
+        // 第一候选就是「确认键会上屏的那个」，用主候选的样式
+        isFirst -> 0xFFA8620A.toInt()
+        item.kind == CandidateKind.SENTENCE_ALT -> 0xFF3F4757.toInt()
+        item.kind == CandidateKind.EXTENSION -> 0xFF5B6472.toInt()
+        // 下一词建议：蓝色，和本地候选区分开
+        item.kind == CandidateKind.NEXT_WORD -> 0xFF2F6DF6.toInt()
+        // 自动纠错（本地拼音容错）：深绿——「这条是帮你改过的」
+        item.kind == CandidateKind.CORRECTION -> 0xFF0F7B4A.toInt()
+        // 云端整句纠错：紫红——「这是大模型改的整句」
+        item.kind == CandidateKind.CORRECTION_TEXT -> 0xFF8E44AD.toInt()
+        // 云端按上文消歧后提上来的：深蓝，一眼能看出「这个是结合上文挑的」
+        item.promoted -> 0xFF1F5FBF.toInt()
+        else -> 0xFF171B23.toInt()
+    }
+
+    /** 候选字的底色；0 = 不要底色。 */
+    private fun chipBackground(item: Candidate, isFirst: Boolean): Int = when {
+        isFirst -> 0xFFFFF8E8.toInt()
+        item.kind == CandidateKind.CORRECTION -> 0xFFE4F4EA.toInt()
+        item.kind == CandidateKind.CORRECTION_TEXT -> 0xFFF3E8F8.toInt()
+        item.promoted -> 0xFFEDF3FE.toInt()
+        else -> 0
+    }
+
+    /** 候选字的字号。 */
+    private fun chipTextSize(item: Candidate): Float = when (item.kind) {
+        CandidateKind.SENTENCE -> 20f
+        // 纠错候选字号稍大一点：它是最需要被看见的那个
+        CandidateKind.CORRECTION -> 19f
+        CandidateKind.SENTENCE_ALT -> 18f
+        CandidateKind.WORD, CandidateKind.CHAR -> 18f
+        // 扩展候选、下一词建议：字号小一档，视觉上和主候选分开
+        CandidateKind.EXTENSION, CandidateKind.NEXT_WORD -> 17f
+        // 云端整句纠错：一整句话，字号小一档才放得下
+        CandidateKind.CORRECTION_TEXT -> 16f
+    }
+
+    /** 点候选：按候选的类别决定怎么上屏。 */
+    private fun commitChip(item: Candidate) {
+        when (item.kind) {
+            // 单字是「前面的音节 + 这个字」
+            CandidateKind.CHAR -> commitChar(item.text)
+            // 云端整句纠错：把已上屏的那段换掉
+            CandidateKind.CORRECTION_TEXT -> applyCorrection()
+            // 其余是整条上屏
+            else -> commitText(item.text)
+        }
+    }
+
+    /**
+     * 进入「改这个字」模式。
+     *
+     * 候选栏换成那个音节的候选字，选一个就把那个字换掉。
+     *
+     * @param charIndex 改的是候选里的第几个字
+     * @param baseText  被改的那个候选的原文
+     */
+    private fun startEditingSyllable(charIndex: Int, baseText: String) {
+        if (charIndex !in session.pending.indices) return
+        editingSyllable = charIndex
+        editBase = baseText
+        editCharIndex = charIndex
+        lastCandidateSig = null      // 强制重建 chip
+        refresh()
+    }
+
+    /**
+     * 「改这个字」模式的候选栏：那个音节的候选字。
+     */
+    private fun renderSyllableCandidates() {
+        val bar = candidateBar ?: return
+        val scroll = candidateScroll ?: return
+        val index = editingSyllable ?: return
+        if (index !in session.pending.indices) {
+            editingSyllable = null
+            renderCandidates()
+            return
+        }
+        val syllable = session.pending[index].syllable ?: ""
+        // candidateChars 返回的是该音节的候选字**连写成的字符串**（按词频降序）
+        val raw = engine.candidateChars(syllable)
+        if (raw.isEmpty()) {
+            editingSyllable = null
+            renderCandidates()
+            return
+        }
+        // 当前被改的那个候选里，这个位置上的字（比如「智慧」的「智」）置顶——
+        // 用户改的就是它，得一眼能看见。
+        val curChar = editBase?.getOrNull(editCharIndex)
+        var chars = raw.take(30).toList()
+        if (curChar != null && chars.contains(curChar)) {
+            // 注意顺序：先摘出去，再**放到最前面**。
+            // 反过来写（filterNot + curChar）会把它追加到末尾，等于没置顶。
+            chars = listOf(curChar) + chars.filterNot { it == curChar }
+        }
+        scroll.visibility = View.VISIBLE
+        candidateIndicator?.visibility = View.INVISIBLE
+        bar.removeAllViews()
+
+        // 标题：正在改哪个字（显示汉字 + 拼音）
+        bar.addView(
+            TextView(this).apply {
+                text = "改「${curChar ?: syllable}」（$syllable）→"
+                textSize = 12f
+                setTextColor(0xFF6B7280.toInt())
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(8f).toInt(), 0, dp(8f).toInt(), 0)
+                setOnClickListener {
+                    // 点标题 = 放弃修改
+                    editingSyllable = null
+                    lastCandidateSig = null
+                    refresh()
+                }
+            }
+        )
+        for (ch in chars) {
+            val s = ch.toString()
+            bar.addView(
+                TextView(this).apply {
+                    text = s
+                    textSize = 20f
+                    setTextColor(0xFF171B23.toInt())
+                    gravity = Gravity.CENTER
+                    setPadding(dp(12f).toInt(), dp(4f).toInt(), dp(12f).toInt(), dp(4f).toInt())
+                    setOnClickListener {
+                        // 把被改的那条候选**原地换掉**：
+                        // 原文本 → 改过的文本。映射是持久的，
+                        // 端侧重排回来再渲染一次也不会被冲掉。
+                        val base = editBase
+                        if (base != null && editCharIndex in base.indices) {
+                            charEdits[base] = base.replaceRange(editCharIndex, editCharIndex + 1, s)
+                        }
+                        editingSyllable = null
+                        editBase = null
+                        lastCandidateSig = null
+                        refresh()
+                    }
                 }
             )
-            setPadding(dp(12f).toInt(), dp(4f).toInt(), dp(12f).toInt(), dp(4f).toInt())
-            if (isFirst) setBackgroundColor(0xFFFFF8E8.toInt())
-            else if (item.kind == CandidateKind.CORRECTION) setBackgroundColor(0xFFE4F4EA.toInt())
-            else if (item.kind == CandidateKind.CORRECTION_TEXT) setBackgroundColor(0xFFF3E8F8.toInt())
-            else if (item.promoted) setBackgroundColor(0xFFEDF3FE.toInt())
-            setOnClickListener {
-                when (item.kind) {
-                    // 单字是「前面的音节 + 这个字」
-                    CandidateKind.CHAR -> commitChar(item.text)
-                    // 云端整句纠错：把已上屏的那段换掉
-                    CandidateKind.CORRECTION_TEXT -> applyCorrection()
-                    // 其余是整条上屏
-                    else -> commitText(item.text)
-                }
-            }
         }
-        candidateBar?.addView(tv)
+        bar.post { updatePageInfo() }
     }
 
     /** 是不是「纠错」类的候选（本地拼音容错 + 云端整句纠错）。 */
@@ -806,7 +1122,7 @@ class ShuangpinImeService : InputMethodService() {
         // commitText 会顶掉宿主里的预编辑区；顶不掉的（有些 App 自己实现了 InputConnection）
         // 这里再补一次清理，别让「已上屏」和「预编辑」两份内容并存。
         clearComposing()
-        committedText.append(text)
+        noteCommitted(text)
         pushUndo(text)
         // 上下文变了，上一轮的下一词建议作废
         nextWords = emptyList()
@@ -998,7 +1314,7 @@ class ShuangpinImeService : InputMethodService() {
         // 否则这次 commit 的字符会把预编辑区顶掉，那半个拼音就凭空消失了。
         clearComposing()
         ic.commitText(text, 1)
-        committedText.append(text)
+        noteCommitted(text)
         pushUndo(text)
         refresh()
     }
@@ -1022,36 +1338,48 @@ class ShuangpinImeService : InputMethodService() {
     }
 
     private fun onSpacePressed() {
-        if (rawMode) {
-            // 英文/数字/标点模式下字符是直接上屏的，没有「待上屏的缓冲」，
-            // 所以空格就只是一个普通的空格字符。
-            // （之前这里因为缓冲恒为空，空格变成了「触发编辑框 action」，
-            //   结果英文里根本打不出空格。）
-            commitRaw(" ")
-            return
-        }
-        // 空格上屏「候选栏的第一个候选」。
+        // **空格就是空格**，不再兼任「上屏候选」。
         //
-        // 模型重排之后，第一个候选可能已经不是引擎的最优整句了——
-        // 那它就是新的「整句」，空格必须跟着变，
-        // 否则用户看到的第一候选和空格上屏的会是两个东西。
+        // 以前用空��上屏候选（双拼输入法的老习惯），代价是**空格根本打不出来**——
+        // 用户反馈「增加确认按键，不要空格键确认，否则空格键打不出空格」。
+        // 现在上屏由右下角的**确认键**负责，空格只插空格。
+        commitRaw(" ")
+    }
+
+    /**
+     * 确认键（右下角那个蓝的）。
+     *
+     * 做两件事，按顺序：
+     * 1. 有待上屏的候选 → 先上屏（跟以前按空格一样）
+     * 2. 再触发编辑框声明的 action（搜索/发送/完成…）
+     *
+     * 两件事都做，是因为「打完一段话直接搜」是最常见的用法：
+     * 只做 1 的话字上屏了但没搜索，只做 2 的话这段话根本没进搜索框。
+     */
+    private fun onConfirmPressed() {
+        // ① 先上屏
         val top = topCandidateText
+        var committed = false
         if (top != null && session.pending.isNotEmpty()) {
             commitText(top)
-            return
-        }
-        // 没有预编辑内容，但有云端给的下一词建议：空格把它打上去
-        if (top != null && nextWords.isNotEmpty()) {
+            committed = true
+        } else if (top != null && nextWords.isNotEmpty()) {
             commitNextWord(top)
-            return
+            committed = true
+        } else {
+            val text = session.commitTop()
+            if (text != null) {
+                commitToHost(text)
+                committed = true
+            }
         }
-        // 候选栏还没有内容（不该发生），退回引擎的最优切分
-        val text = session.commitTop()
-        if (text != null) {
-            commitToHost(text)
-            return
+        // ② 再触发 action
+        if (committed) {
+            performEditorActionIfAny()
+        } else {
+            // 没什么可上屏的（比如光标在空白处）——照样触发 action
+            performEditorActionIfAny()
         }
-        performEditorActionIfAny()
     }
 
     /**
@@ -1064,7 +1392,7 @@ class ShuangpinImeService : InputMethodService() {
         val ic = currentInputConnection ?: return
         ic.commitText(text, 1)
         session.commitText(text)
-        committedText.append(text)
+        noteCommitted(text)
         pushUndo(text)
         nextWords = emptyList()
         refresh()
@@ -1102,7 +1430,15 @@ class ShuangpinImeService : InputMethodService() {
         // 删宿主应用里的一个字
         ic.deleteSurroundingText(1, 0)
         // 上下文也跟着变：不然下一轮联想会基于已经删掉的字
-        if (committedText.isNotEmpty()) committedText.setLength(committedText.length - 1)
+        if (committedText.isNotEmpty()) {
+            committedText.setLength(committedText.length - 1)
+            // 最后一个上屏单元的长度也要跟着减一
+            val last = committedUnits.lastOrNull()
+            if (last != null) {
+                if (last > 1) committedUnits[committedUnits.lastIndex] = last - 1
+                else committedUnits.removeLast()
+            }
+        }
         // 上文被删光了，联想也就没有依据了
         if (committedText.isEmpty() && hasLexeme) {
             resetLexeme()
@@ -1158,9 +1494,21 @@ class ShuangpinImeService : InputMethodService() {
         if (t.isEmpty()) return
         val ic = currentInputConnection ?: return
         ic.commitText(t, 1)
-        committedText.append(t)
+        noteCommitted(t)
         pushUndo(t)
         refresh()
+    }
+
+    /**
+     * 记一笔「上屏了这么多字」。
+     *
+     * 除了文本本身，还记下**这一笔的长度**——
+     * 上滑退格要按词退（退一个上屏单元，而不是一个字一个字退），
+     * 就靠这个长度表知道每个单元有多长。
+     */
+    private fun noteCommitted(text: String) {
+        committedText.append(text)
+        committedUnits.addLast(text.length)
     }
 
     /** 打开设置页。 */
@@ -1278,8 +1626,32 @@ class ShuangpinImeService : InputMethodService() {
             refresh()
             return
         }
-        // ② 没有输入可退了：删掉已上屏的文字
-        deleteCommitted()
+        // ② 没有输入可退了：退掉已上屏的**一个词/句**
+        deleteLastCommittedUnit()
+    }
+
+    /**
+     * 退掉已上屏的**一个上屏单元**（一次上屏的那一整块，通常是一个词或一句）。
+     *
+     * 用户反馈「打一段话不能修改之前的文字，只能修改最后一个字」：
+     * 一个字一个字退，想改中间那个错字得把后面的全删光重打。
+     * 按单元退的话，退两次就到那儿了。
+     */
+    private fun deleteLastCommittedUnit() {
+        val ic = currentInputConnection ?: return
+        val cur = committedText.toString()
+        if (cur.isEmpty()) return
+        // 这一单元有多长（记在上屏的时候）
+        val unit = committedUnits.removeLastOrNull() ?: 1
+        val n = unit.coerceIn(1, cur.length)
+        val removed = cur.substring(cur.length - n)
+        ic.deleteSurroundingText(n, 0)
+        committedText.setLength(cur.length - n)
+        // 记一笔「插入」，滑下来就能原样恢复
+        undoStack.addLast(UndoOp.Insert(removed))
+        // 上文变了，联想也就没有依据了
+        resetLexeme()
+        refresh()
     }
 
     /** 删掉本会话已上屏的全部文字（可撤销）。 */
@@ -1291,6 +1663,7 @@ class ShuangpinImeService : InputMethodService() {
         // 记一笔「插入」，滑下来就能原样恢复
         undoStack.addLast(UndoOp.Insert(deleted))
         committedText.clear()
+        committedUnits.clear()
         session.clear()
         // 上文没了，联想也就没有依据了
         resetLexeme()
@@ -1310,7 +1683,7 @@ class ShuangpinImeService : InputMethodService() {
 
             is UndoOp.Insert -> {
                 ic.commitText(op.text, 1)
-                committedText.append(op.text)
+                noteCommitted(op.text)
             }
 
             is UndoOp.RestoreInput -> {
@@ -1388,28 +1761,34 @@ class ShuangpinImeService : InputMethodService() {
         /**
          * 键盘本体高度（dp），**固定不变**。
          * 键位坐标由它决定，所以它一变，用户的肌肉记忆就废。
+         *
+         * 候选栏加高时**这里等量减高**——总窗口高度不变，
+         * 键位的绝对位置就一动不动，用户不用重新适应。
          */
-        const val KEYBOARD_HEIGHT_DP = 224f
+        const val KEYBOARD_HEIGHT_DP = 216f
 
         /**
          * 候选栏高度（dp）。
          * 这一条**永远占位**，没候选时用 INVISIBLE 而不是 GONE——
          * GONE 会让布局塌陷、键盘跟着往上跳，用户的第二个键就按空了。
+         *
+         * 46 dp 是给「候选词的拼音角标」留的：角标(16dp) + 汉字(25dp) = 41dp，
+         * 剩 5dp 余量。38 dp 塞不下，角标就会压在汉字上（真机截图抓过）。
          */
-        const val CANDIDATE_BAR_DP = 38f
+        const val CANDIDATE_BAR_DP = 46f
 
         /**
-         * 输入法窗口高度（dp），**固定不变** = 候选栏 38 + 键盘 224 + 底部留白 56。
+         * 输入法窗口高度（dp），**固定不变** = 候选栏 46 + 键盘 216 + 底部留白 56。
          */
         const val IME_WINDOW_HEIGHT_DP = 318f
 
         /**
-         * 内容区高度（dp）= 候选栏 38 + 键盘 224。
+         * 内容区高度（dp）= 候选栏 46 + 键盘 216。
          *
          * onComputeInsets 报的是**内容区**高度，不是整个窗口——
          * 报窗口高度的话，宿主应用会把输入框挤得更靠上，某些 App 里反而被遮住。
          */
-        const val CONTENT_HEIGHT_DP = 262f
+        const val CONTENT_HEIGHT_DP = 254f
 
         /**
          * 根布局底部留白（dp），给系统导航条（地球切换键那一行）腾位置。

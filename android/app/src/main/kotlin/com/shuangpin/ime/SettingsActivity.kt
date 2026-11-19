@@ -102,6 +102,8 @@ class SettingsActivity : Activity() {
         )
         root.addView(divider())
 
+        buildLayoutSection(root)
+        root.addView(divider())
         buildCloudSection(root)
         root.addView(divider())
         buildRerankSection(root)
@@ -218,6 +220,42 @@ class SettingsActivity : Activity() {
             }
         )
         return box
+    }
+
+    /**
+     * 键盘布局：单手右手 / 单手左手 / 全键盘。
+     *
+     * 单手模式把字母区收窄到拇指那一侧，**字母的相对位置不变**——
+     * 双拼的位置记忆（小鹤 zh→v、ch→i、sh→u）绑定在字母键位上，打乱就废。
+     * 候选栏也跟着收窄到同一侧，否则最顺手的候选反而够不着。
+     *
+     * 改完下次弹键盘就生效（输入法服务是常驻的，不会因为改设置而重建）。
+     */
+    private fun buildLayoutSection(root: LinearLayout) {
+        root.addView(sectionTitle("键盘布局"))
+        root.addView(
+            hint(
+                "单手模式把字母区收窄到拇指那一侧，候选栏跟着收窄。\n" +
+                    "字母的相对位置不变——双拼的位置记忆不受影响。改完下次弹键盘生效。"
+            )
+        )
+        val group = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val options = listOf(
+            "单手·右手（推荐）" to ImeSettings.KEY_LAYOUT_RIGHT,
+            "单手·左手" to ImeSettings.KEY_LAYOUT_LEFT,
+            "全键盘" to ImeSettings.KEY_LAYOUT_FULL,
+        )
+        val current = settings.keyLayout
+        for ((label, value) in options) {
+            val rb = RadioButton(this).apply { text = label }
+            group.addView(rb)
+            // 先定选中状态再挂监听——反过来的话初始化就会误触发一次
+            rb.isChecked = value == current
+            rb.setOnCheckedChangeListener { _, checked ->
+                if (checked) settings.keyLayout = value
+            }
+        }
+        root.addView(group)
     }
 
     /** 云端大模型：联想 / 消歧 / 纠错都用它。 */

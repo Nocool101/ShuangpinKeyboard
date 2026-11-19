@@ -66,6 +66,19 @@ class ImeSettings(context: Context) {
         get() = prefs.getString(KEY_LLM_TEMPERATURE, "0.3")?.toFloatOrNull() ?: 0.3f
         set(v) = prefs.edit().putString(KEY_LLM_TEMPERATURE, v.toString()).apply()
 
+    /**
+     * 键盘形态：
+     * - `full`：全键盘，横跨屏宽
+     * - `right`：单手·右手，字母区收窄到右侧
+     * - `left`：单手·左手，字母区收窄到左侧
+     *
+     * **默认单手右手**——单手模式是这套键盘的推荐用法。
+     * 字母的相对位置三种形态都一样（双拼的位置记忆不能动）。
+     */
+    var keyLayout: String
+        get() = prefs.getString(KEY_KEY_LAYOUT, KEY_LAYOUT_RIGHT) ?: KEY_LAYOUT_RIGHT
+        set(v) = prefs.edit().putString(KEY_KEY_LAYOUT, v).apply()
+
     // ------------------------------------------------------------------
     // 端侧重排
     // ------------------------------------------------------------------
@@ -183,6 +196,17 @@ class ImeSettings(context: Context) {
         const val KEY_LLM_TEMPERATURE = "llm.temperature"
 
         const val KEY_RERANK_ENABLED = "rerank.enabled"
+
+        const val KEY_KEY_LAYOUT = "key.layout"
+
+        /** 全键盘。 */
+        const val KEY_LAYOUT_FULL = "full"
+
+        /** 单手·右手。 */
+        const val KEY_LAYOUT_RIGHT = "right"
+
+        /** 单手·左手。 */
+        const val KEY_LAYOUT_LEFT = "left"
 
         const val KEY_ASR_ENABLED = "asr.enabled"
         const val KEY_ASR_ENDPOINT = "asr.endpoint"

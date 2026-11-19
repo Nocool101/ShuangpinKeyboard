@@ -222,12 +222,26 @@ async function minimaxPredict(req, system) {
       messages: [{ role: 'user', content: buildUserMessage(req) }],
     }),
   });
-  if (!res.ok) throw new Error(`模型返回 ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) throw upstreamError(res.status, await res.text());
   const data = await res.json();
   const raw = (data.content || [])
     .map((c) => (c.type === 'text' ? c.text : ''))
     .join('');
   return parseNext(raw, pickMode(req) === 'correct');
+}
+
+/**
+ * 上游报错：把状态码挂在错误对象上。
+ *
+ * 为什么要单独记：**限流（429）和真故障（500/401）要分开**。
+ * 之前一律转成 502，客户端只看到「服务坏了」，
+ * 手机上表现为「云端功能时好时坏」，实际只是额度用完了；
+ * 测试也只能把限流当成失败来报。
+ */
+function upstreamError(status, text) {
+  const e = new Error(`模型返回 ${status}: ${String(text || '').slice(0, 200)}`);
+  e.upstreamStatus = status;
+  return e;
 }
 
 async function stepfunPredict(req, system) {
@@ -250,7 +264,7 @@ async function stepfunPredict(req, system) {
       ],
     }),
   });
-  if (!res.ok) throw new Error(`模型返回 ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) throw upstreamError(res.status, await res.text());
   const data = await res.json();
   const raw = data?.choices?.[0]?.message?.content || '';
   return parseNext(raw, pickMode(req) === 'correct');
@@ -275,7 +289,7 @@ async function openaiPredict(req, system) {
       ],
     }),
   });
-  if (!res.ok) throw new Error(`模型返回 ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) throw upstreamError(res.status, await res.text());
   const data = await res.json();
   const raw = data?.choices?.[0]?.message?.content || '';
   return parseNext(raw, pickMode(req) === 'correct');
@@ -437,7 +451,10 @@ const server = createServer((req, res) => {
       res.end(JSON.stringify({ next }));
     } catch (e) {
       console.error('联想失败：', e.message);
-      res.writeHead(502, { 'content-type': 'application/json' });
+      // 上游被限流（429）就把 429 传下去：
+      // 客户端看到 429 知道「等一会儿再来」，看到 502 知道「服务真出问题了」。
+      const code = e && e.upstreamStatus === 429 ? 429 : 502;
+      res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: String(e.message || e) }));
     }
   });

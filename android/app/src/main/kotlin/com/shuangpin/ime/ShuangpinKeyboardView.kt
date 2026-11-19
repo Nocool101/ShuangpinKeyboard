@@ -2,6 +2,7 @@ package com.shuangpin.ime
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.os.Handler
@@ -55,6 +56,23 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         PUNCTUATION,
     }
 
+    /**
+     * 键盘形态。
+     *
+     * - [FULL]：横跨整个屏宽，两只手都能用
+     * - [RIGHT]：**单手·右手**——字母区收窄到右侧，拇指够得到
+     * - [LEFT]：**单手·左手**——字母区收窄到左侧
+     *
+     * **字母的相对位置一律不变**——双拼的位置记忆绑定在字母键位上
+     * （小鹤 zh→v、ch→i、sh→u），打乱了就废。
+     * 单手模式只改「整块键盘摆在哪儿、每行多宽」。
+     */
+    enum class Layout {
+        FULL,
+        RIGHT,
+        LEFT,
+    }
+
     interface Listener {
         /** 双拼字母键（中文模式） */
         fun onPinyinKey(key: String)
@@ -64,6 +82,14 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
 
         fun onSpace()
         fun onBackspace()
+
+        /**
+         * **确认键**（右下角那个蓝的）。
+         *
+         * 空格只管打空格，确认归确认——
+         * 以前用空���上屏，导致空格根本打不出来。
+         */
+        fun onConfirm() {}
 
         /** 退格键上滑：一次退一格（先退最后输入的音节，再往前退，最后退已上屏的文字） */
         fun onSwipeUpDelete()
@@ -110,6 +136,21 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             }
         }
 
+    /**
+     * 键盘形态。默认**单手右手**。
+     *
+     * 设在设置页里（常驻生效，不在键盘上放切换键——
+     * 底栏每个像素都是手指要够的地方）。
+     */
+    var layout: Layout = Layout.RIGHT
+        set(value) {
+            if (field != value) {
+                field = value
+                layoutKeys()
+                invalidate()
+            }
+        }
+
     /** 英文模式是否大写。 */
     var upperCase: Boolean = false
         set(value) {
@@ -121,6 +162,19 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
 
     /** 空格键的文案，随编辑框的 IME action 变化（搜索/发送/完成…）。 */
     var spaceLabel: String = "空格"
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
+    /**
+     * 确认键的文案，随编辑框的 IME action 变化（搜索/发送/完成/换行）。
+     *
+     * 没有 action 时就是「确认」。
+     */
+    var confirmLabel: String = "确认"
         set(value) {
             if (field != value) {
                 field = value
@@ -192,7 +246,7 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         val kind: Kind,
     )
 
-    private enum class Kind { PINYIN, RAW, SPACE, BACKSPACE, MODE }
+    private enum class Kind { PINYIN, RAW, SPACE, BACKSPACE, MODE, CONFIRM, VOICE }
 
     fun bind(session: InputSession, engine: PinyinEngine) {
         this.session = session
@@ -217,34 +271,156 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         val pad = dp(3f)
         val gap = dp(4f)
         val rowGap = dp(6f)
-        val bottomH = dp(50f)
+        val oneHand = layout != Layout.FULL
+
+        // 字母区（和底栏）占的横向范围。
+        // 单手模式只占屏宽的一部分，**贴着拇指那一侧**——
+        // 拇指的支点在手机右下角，键盘越靠右越好够。
+        blockWidth = if (oneHand) width * ONE_HAND_WIDTH_RATIO else width.toFloat()
+        blockLeft = if (layout == Layout.RIGHT) width - blockWidth else 0f
+
+        // 单手模式底栏矮一点，把高度让给字母键——
+        // 键变窄了，高度得补回来，点击面积才不至于缩水太多。
+        val bottomH = dp(if (oneHand) 44f else 50f)
         val letterH = ((height - bottomH - rowGap * 3 - pad * 2) / 3f).coerceAtLeast(dp(34f))
 
         when (mode) {
             Mode.CHINESE -> layoutChinese(pad, gap, rowGap, letterH)
             Mode.ENGLISH -> layoutEnglish(pad, gap, rowGap, letterH)
-            Mode.NUMBER -> layoutNumber(pad, gap, rowGap, letterH)
+            Mode.NUMBER -> layoutNumber(pad, gap, rowGap, letterH, bottomH)
             Mode.PUNCTUATION -> layoutPunctuation(pad, gap, rowGap, letterH)
         }
 
-        layoutBottomBar(pad, gap, bottomH)
+        // 单手模式：低频的 123 / 符 挪到留白区那一列，
+        // 底栏就全留给「中/英 + 空格 + 退格」了。
+        if (oneHand) layoutSideColumn(gap, bottomH)
+        // 数字面板**不要底栏**——它右列自带 退格/空格/确认（跟参考图一样）
+        if (mode != Mode.NUMBER) {
+            layoutBottomBar(pad, gap, bottomH, oneHand)
+        }
     }
+
+    /** 字母区（和底栏）的横向范围。单手模式收窄到拇指那一侧。 */
+    private var blockLeft = 0f
+    private var blockWidth = 0f
 
     /** 三行字母，大小随行内键数自适应。 */
     private fun layoutRows(rows: List<List<Key>>, pad: Float, gap: Float, rowGap: Float, rowH: Float) {
         rows.forEachIndexed { ri, row ->
-            val rowW = row.size * keyWidth(row.size) + (row.size - 1) * gap
-            val x0 = (width - rowW) / 2f
+            val w = keyWidth(row.size)
+            val rowW = row.size * w + (row.size - 1) * gap
+            // 行在**字母区里**居中（不是整个屏宽居中）
+            val x0 = blockLeft + (blockWidth - rowW) / 2f
             val y0 = pad + ri * (rowH + rowGap)
             row.forEachIndexed { i, key ->
-                val w = keyWidth(row.size)
                 val left = x0 + i * (w + gap)
                 keys += key.copy(rect = RectF(left, y0, left + w, y0 + rowH))
             }
         }
     }
 
-    private fun keyWidth(count: Int): Float = (width - dp(6f) * 2 - dp(4f) * (count - 1)) / count
+    private fun keyWidth(count: Int): Float =
+        (blockWidth - dp(6f) * 2 - dp(4f) * (count - 1)) / count
+
+    /**
+     * 单手模式：留白区里的「语音键」。
+     *
+     * 留白区只有 51 dp 宽，放不下一列功能键，就放**一个竖长的语音键**占满整条——
+     * 窄条不浪费，而且语音键在拇指够得着的位置（比在底栏左端强）。
+     *
+     * 全键盘模式没有留白区，语音走「按住空格说话」。
+     */
+    private fun layoutSideColumn(gap: Float, bottomH: Float) {
+        // 留白条有多宽取决于屏宽和 ONE_HAND_WIDTH_RATIO，
+        // 不能写死 52dp——窄屏上那会把语音键推到屏幕外（左侧按不到）。
+        val stripLeft: Float
+        val stripRight: Float
+        if (layout == Layout.RIGHT) {
+            stripLeft = 0f
+            stripRight = (blockLeft - dp(4f)).coerceAtLeast(0f)
+        } else {
+            stripLeft = blockLeft + blockWidth + dp(4f)
+            stripRight = width.toFloat()
+        }
+        val stripW = stripRight - stripLeft
+        if (stripW < dp(30f)) return   // 太窄就干脆不放，别做一个按不到的键
+        val w = stripW.coerceAtMost(dp(52f))
+        val x = if (layout == Layout.RIGHT) stripRight - w else stripLeft
+        // 竖长：从键盘顶一直到底
+        val top = dp(3f)
+        val h = height - top - dp(3f)
+        keys += Key("voice", "语音", null, null, RectF(x, top, x + w, top + h), Kind.VOICE)
+    }
+
+    private fun layoutBottomBar(pad: Float, gap: Float, bottomH: Float, oneHand: Boolean) {
+        val y0 = height - bottomH - pad
+
+        data class BottomKey(val id: String, val label: String, val kind: Kind)
+
+        // 底栏参考系统输入法的常见排布：
+        // 低频的「符号 / 123 / 中英」在左，**确认键在右下角**——
+        // 那是右手拇指最舒服的位置，也是全键盘模式下确认键的位置。
+        val items = when (mode) {
+            Mode.CHINESE, Mode.ENGLISH -> listOf(
+                BottomKey("mode_punct", "符", Kind.MODE),
+                BottomKey("mode_number", "123", Kind.MODE),
+                BottomKey("mode_english", "中/英", Kind.MODE),
+                BottomKey("space", "空格", Kind.SPACE),
+                BottomKey("back", "⌫", Kind.BACKSPACE),
+                BottomKey("confirm", confirmLabel, Kind.CONFIRM),
+            )
+
+            Mode.NUMBER -> listOf(
+                BottomKey("mode_english", "abc", Kind.MODE),
+                BottomKey("space", "空格", Kind.SPACE),
+                BottomKey("back", "⌫", Kind.BACKSPACE),
+                BottomKey("confirm", confirmLabel, Kind.CONFIRM),
+            )
+
+            Mode.PUNCTUATION -> listOf(
+                // 标点面板是**数字面板唯一的出口**（数字面板按参考图没有底栏），
+                // 所以这里直接给「中文」，别绕到英文面板再切回来。
+                BottomKey("mode_chinese", "中文", Kind.MODE),
+                BottomKey("mode_number", "123", Kind.MODE),
+                BottomKey("space", "空格", Kind.SPACE),
+                BottomKey("back", "⌫", Kind.BACKSPACE),
+                BottomKey("confirm", confirmLabel, Kind.CONFIRM),
+            )
+        }
+
+        // 宽度分配：空格要宽，但确认键不能太窄（它是常用键）
+        val others = items.size - 1
+        val avail = blockWidth - pad * 2 - gap * (items.size - 1)
+        val otherW = dp(
+            when {
+                oneHand -> 42f
+                items.size >= 6 -> 40f
+                else -> 48f
+            }
+        )
+        val confirmW = dp(if (oneHand) 54f else 62f)
+        // 确认键和退格键固定宽，其余（含空格）分剩下的
+        val fixedOthers = others - 1   // 除确认键外的功能键个数
+        val spaceW = (avail - otherW * fixedOthers - confirmW).coerceAtLeast(dp(70f))
+
+        var x = blockLeft + pad
+        for (item in items) {
+            val w = when (item.kind) {
+                Kind.SPACE -> spaceW
+                Kind.CONFIRM -> confirmW
+                else -> otherW
+            }
+            keys += Key(
+                id = item.id,
+                big = item.label,
+                sub = null,
+                badge = null,
+                rect = RectF(x, y0, x + w, y0 + bottomH),
+                kind = item.kind,
+            )
+            x += w + gap
+        }
+    }
 
     private fun layoutChinese(pad: Float, gap: Float, rowGap: Float, rowH: Float) {
         // 标签在**绘制时**才算（见 KeyboardFaces），
@@ -280,13 +456,91 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         layoutRows(rows, pad, gap, rowGap, rowH)
     }
 
-    private fun layoutNumber(pad: Float, gap: Float, rowGap: Float, rowH: Float) {
-        val rows = NUMBER_ROWS.map { line ->
-            line.map { k ->
-                Key(k, k, null, null, RectF(), Kind.RAW)
+    /**
+     * 数字面板：按参考图的排法重做。
+     *
+     * ```
+     *   · \ / : ; ： ( | ×          ← 符号顶行
+     *   % │ 1   2   3 │ ⌫
+     *   + │ 4   5   6 │ 空格
+     *   − │ 7   8   9 │ 前往（蓝，跨两行）
+     *   * │ 返回 0  . │
+     * 符号│           │
+     * ```
+     *
+     * 跟字母面板那套「几行几个」不是一个排法，所以这里单独算。
+     */
+    private fun layoutNumber(pad: Float, gap: Float, rowGap: Float, rowH: Float, bottomH: Float) {
+        // 顶行符号
+        val topH = dp(20f)
+        val topY = pad
+        val syms = listOf("·", "\\", "/", ":", ";", "：", "(", "|", "×")
+        val symW = (blockWidth - pad * 2 - gap * (syms.size - 1)) / syms.size
+        syms.forEachIndexed { i, s ->
+            val x = blockLeft + pad + i * (symW + gap)
+            // **id 就是字符本身**：Kind.RAW 的键上屏的是 id，
+            // 用 "sym_·" 这种内部 id 会把 "sym_·" 打进输入框。
+            keys += Key(s, s, null, null, RectF(x, topY, x + symW, topY + topH), Kind.RAW)
+        }
+
+        // 数字区（**这一面板没有底栏**——右列自带 退格/空格/确认）
+        val areaTop = topY + topH + rowGap
+        val areaBottom = height - pad
+        val areaH = areaBottom - areaTop
+
+        val leftW = dp(48f)
+        val rightW = dp(52f)
+        val centerLeft = blockLeft + pad + leftW + gap
+        val centerRight = blockLeft + blockWidth - pad - rightW - gap
+        val colW = (centerRight - centerLeft - gap * 2) / 3f
+
+        // 左列：% + − * 符号（5 格，比中区的 4 行密一点，跟参考图一致）
+        val lh = (areaH - gap * 4) / 5f
+        listOf("%", "+", "−", "*").forEachIndexed { i, s ->
+            val y = areaTop + i * (lh + gap)
+            keys += Key(s, s, null, null, RectF(blockLeft + pad, y, blockLeft + pad + leftW, y + lh), Kind.RAW)
+        }
+        val symY = areaTop + 4 * (lh + gap)
+        keys += Key(
+            "mode_punct", "符号", null, null,
+            RectF(blockLeft + pad, symY, blockLeft + pad + leftW, areaBottom),
+            Kind.MODE,
+        )
+
+        // 中间 3 列 × 4 行
+        val rh = (areaH - gap * 3) / 4f
+        val grid = listOf(
+            listOf("1", "2", "3"),
+            listOf("4", "5", "6"),
+            listOf("7", "8", "9"),
+            listOf("返回", "0", "."),
+        )
+        grid.forEachIndexed { r, line ->
+            line.forEachIndexed { c, s ->
+                val x = centerLeft + c * (colW + gap)
+                val y = areaTop + r * (rh + gap)
+                if (s == "返回") {
+                    keys += Key("back", "返回", null, null, RectF(x, y, x + colW, y + rh), Kind.BACKSPACE)
+                } else {
+                    // id = 数字本身，Kind.RAW 直接上屏 id（见上面顶行符号的说明）
+                    keys += Key(s, s, null, null, RectF(x, y, x + colW, y + rh), Kind.RAW)
+                }
             }
         }
-        layoutRows(rows, pad, gap, rowGap, rowH)
+
+        // 右列：退格 / 空格 / 确认（确认跨两行）
+        val rx = centerRight + gap
+        keys += Key("back", "⌫", null, null, RectF(rx, areaTop, rx + rightW, areaTop + rh), Kind.BACKSPACE)
+        keys += Key(
+            "space", "空格", null, null,
+            RectF(rx, areaTop + rh + gap, rx + rightW, areaTop + 2 * rh + gap),
+            Kind.SPACE,
+        )
+        keys += Key(
+            "confirm", confirmLabel, null, null,
+            RectF(rx, areaTop + 2 * (rh + gap), rx + rightW, areaBottom),
+            Kind.CONFIRM,
+        )
     }
 
     private fun layoutPunctuation(pad: Float, gap: Float, rowGap: Float, rowH: Float) {
@@ -298,63 +552,20 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         layoutRows(rows, pad, gap, rowGap, rowH)
     }
 
-    private fun layoutBottomBar(pad: Float, gap: Float, bottomH: Float) {
-        val y0 = height - bottomH - pad
-
-        data class BottomKey(val id: String, val label: String, val kind: Kind)
-
-        val items = when (mode) {
-            Mode.CHINESE, Mode.ENGLISH -> listOf(
-                BottomKey("mode_english", if (mode == Mode.CHINESE) "中/英" else "中/英", Kind.MODE),
-                BottomKey("mode_number", "123", Kind.MODE),
-                BottomKey("mode_punct", "符", Kind.MODE),
-                BottomKey("space", "空格", Kind.SPACE),
-                BottomKey("back", "⌫", Kind.BACKSPACE),
-            )
-
-            Mode.NUMBER -> listOf(
-                BottomKey("mode_english", "abc", Kind.MODE),
-                BottomKey("mode_punct", "符", Kind.MODE),
-                BottomKey("space", "空格", Kind.SPACE),
-                BottomKey("back", "⌫", Kind.BACKSPACE),
-            )
-
-            Mode.PUNCTUATION -> listOf(
-                BottomKey("mode_english", "abc", Kind.MODE),
-                BottomKey("mode_number", "123", Kind.MODE),
-                BottomKey("space", "空格", Kind.SPACE),
-                BottomKey("back", "⌫", Kind.BACKSPACE),
-            )
-        }
-
-        // 空格键要**最宽**——它是输入法的第二常用键，
-        // 之前算成了最窄的那个，用户根本找不到（报「空格键没有了」）。
-        val otherCount = items.size - 1
-        val avail = width - pad * 2 - gap * (items.size - 1)
-        val otherW = dp(52f)
-        val spaceW = (avail - otherW * otherCount).coerceAtLeast(dp(96f))
-
-        var x = pad
-        for (item in items) {
-            val w = if (item.kind == Kind.SPACE) spaceW else otherW
-            keys += Key(
-                id = item.id,
-                big = item.label,
-                sub = null,
-                badge = null,
-                rect = RectF(x, y0, x + w, y0 + bottomH),
-                kind = item.kind,
-            )
-            x += w + gap
-        }
-    }
-
     // ------------------------------------------------------------------
     // 绘制
     // ------------------------------------------------------------------
 
     override fun onDraw(canvas: Canvas) {
         canvas.drawColor(COLOR_BG)
+        if (layout != Layout.FULL) {
+            // 单手模式：字母区跟留白区之间画一道淡线，
+            // 让「键盘只占这一边」这件事一眼看得出来，不至于以为屏幕那边坏了。
+            val edge = if (layout == Layout.RIGHT) blockLeft else blockWidth
+            stroke.strokeWidth = dp(1f)
+            stroke.color = COLOR_DEAD_BORDER
+            canvas.drawLine(edge, 0f, edge, height.toFloat(), stroke)
+        }
         for (key in keys) {
             when (key.kind) {
                 Kind.PINYIN -> drawPinyin(canvas, key)
@@ -404,47 +615,80 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         bigText.textSize = dp(if (face.big.length >= 3) 14f else 17f)
         // 太长就缩字号，避免超出键宽（"er/uan"、"iang/uang" 这类）
         val maxWidth = key.rect.width() - dp(6f)
-        while (bigText.measureText(face.big) > maxWidth && bigText.textSize > dp(9f)) {
+        // 单手模式键窄，下限放低一点，不然「uang」这种缩到 9dp 还是装不下
+        val narrow = key.rect.width() < dp(28f)
+        val minSize = if (narrow) dp(7f) else dp(9f)
+        // 窄键上「ing/uai」这种带斜杠的**主标签**（韵母位里无效键的提示）
+        // 只留第一个——塞不下两个，糊到隔壁键上更糟。
+        var bigShown = if (narrow) face.big.substringBefore('/') else face.big
+        while (bigText.measureText(bigShown) > maxWidth && bigText.textSize > minSize) {
             bigText.textSize -= dp(0.5f)
         }
         val bigBaseline = key.rect.centerY() - dp(if (hasSub) 4f else 0f) -
             (bigText.descent() + bigText.ascent()) / 2f
-        canvas.drawText(face.big, key.rect.centerX(), bigBaseline, bigText)
+        canvas.drawText(bigShown, key.rect.centerX(), bigBaseline, bigText)
 
         // 副标签（声母位：该键承载的常用韵母）
         if (hasSub) {
+            // 键窄的时候只显示第一个韵母：「er/uan」→「er」。
+            // 挤着显示两个在单手模式下根本看不清，倒不如只留常用的那个。
+            var shown = if (narrow) sub.substringBefore('/') else sub
             smallText.color = if (face.dead) COLOR_DEAD_TEXT else COLOR_MUTED
             smallText.isFakeBoldText = true
             smallText.textSize = dp(11f)
-            while (smallText.measureText(sub) > maxWidth && smallText.textSize > dp(7f)) {
+            while (smallText.measureText(shown) > maxWidth && smallText.textSize > dp(6f)) {
                 smallText.textSize -= dp(0.5f)
             }
-            canvas.drawText(sub, key.rect.centerX(), bigBaseline + dp(14f), smallText)
+            // 还是装不下就换个短的（「整体认读」→「整读」），
+            // 再装不下就不画——宁可少个提示，也不要糊到隔壁键上去。
+            if (smallText.measureText(shown) > maxWidth) {
+                val shorter = when {
+                    shown.startsWith("整体认读") -> "整读"
+                    else -> ""
+                }
+                if (shorter.isNotEmpty() && smallText.measureText(shorter) <= maxWidth) {
+                    shown = shorter
+                } else {
+                    shown = ""
+                }
+            }
+            if (shown.isNotEmpty()) {
+                canvas.drawText(shown, key.rect.centerX(), bigBaseline + dp(14f), smallText)
+            }
         }
     }
 
     private fun drawPlain(canvas: Canvas, key: Key) {
         // 字符键跟中文键一样白底，只有底栏的功能键是灰底
-        val isAction = key.kind == Kind.SPACE || key.kind == Kind.BACKSPACE || key.kind == Kind.MODE
+        val isAction = key.kind == Kind.SPACE || key.kind == Kind.BACKSPACE ||
+            key.kind == Kind.MODE || key.kind == Kind.VOICE
         fill.color = when {
             key === pressed -> COLOR_PRESSED
+            // 确认键是品牌蓝——它是最该被一眼看到的那颗键
+            key.kind == Kind.CONFIRM -> COLOR_ACCENT
+            key.kind == Kind.VOICE -> COLOR_VOICE_BG
             isAction -> COLOR_ACTION_BG
             else -> COLOR_KEY_BG
         }
         canvas.drawRoundRect(key.rect, dp(8f), dp(8f), fill)
         stroke.strokeWidth = dp(1f)
-        stroke.color = COLOR_KEY_BORDER
+        stroke.color = if (key.kind == Kind.CONFIRM) COLOR_ACCENT else COLOR_KEY_BORDER
         canvas.drawRoundRect(key.rect, dp(8f), dp(8f), stroke)
 
         val label = when (key.kind) {
-            Kind.BACKSPACE -> "⌫"
             Kind.SPACE -> spaceLabel
             else -> key.big
         }
-        bigText.color = if (key.kind == Kind.BACKSPACE) COLOR_SUB else COLOR_INK
+        bigText.color = when (key.kind) {
+            Kind.BACKSPACE -> COLOR_SUB
+            Kind.CONFIRM -> Color.WHITE
+            Kind.VOICE -> COLOR_ACCENT
+            else -> COLOR_INK
+        }
         bigText.textSize = dp(
             when {
                 key.kind == Kind.BACKSPACE -> 18f
+                key.kind == Kind.VOICE -> 15f
                 label.length >= 3 -> 13f
                 else -> 17f
             }
@@ -487,6 +731,11 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                         handler.postDelayed(voiceHoldStarter, VOICE_HOLD_MS)
                     }
                 }
+                // 语音键（单手模式侧边那条长键）：**按下就录，松手就停**
+                if (key?.kind == Kind.VOICE) {
+                    voiceStarted = true
+                    listener?.onVoiceStart()
+                }
                 return true
             }
 
@@ -515,6 +764,13 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 pressed = null
                 stopRepeat()
                 invalidate()
+                // 语音键：松手结束录音
+                if (key?.kind == Kind.VOICE) {
+                    if (voiceStarted) listener?.onVoiceStop()
+                    voiceStarted = false
+                    performClick()
+                    return true
+                }
                 if (voiceArmed) {
                     // 这一下是「按住说话」：松手结束录音，不再上屏空格
                     handler.removeCallbacks(voiceHoldStarter)
@@ -579,11 +835,19 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             Kind.RAW -> listener?.onRawChar(key.id)
             Kind.SPACE -> listener?.onSpace()
             Kind.BACKSPACE -> listener?.onBackspace()
+            Kind.CONFIRM -> listener?.onConfirm()
+            // 语音键是「按下就录、松手就停」，在 onTouchEvent 里处理，不走 fire()
+            Kind.VOICE -> Unit
             Kind.MODE -> when (key.id) {
                 "mode_english" -> {
                     val next = if (mode == Mode.CHINESE) Mode.ENGLISH else Mode.CHINESE
                     mode = next
                     listener?.onModeChanged(next)
+                }
+
+                "mode_chinese" -> {
+                    mode = Mode.CHINESE
+                    listener?.onModeChanged(Mode.CHINESE)
                 }
 
                 "mode_number" -> {
@@ -600,6 +864,21 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
     }
 
     companion object {
+        /**
+         * 单手模式：字母区占屏宽的比例。
+         *
+         * 0.86 是「拇指够得到」和「键还够大」之间的折中：
+         * 全屏宽时每键 31.7 dp，收窄到 86% 后每键约 26.6 dp。
+         *
+         * **为什么不是更窄**：收到 72% 的时候反馈是「左侧大片空白浪费，键还有点小」——
+         * 收窄换来的只是键变小，空白还是浪费。86% 把浪费压到一条 51dp 的窄条，
+         * 那条窄条放一个竖长的语音键，不浪费。
+         *
+         * 候选栏要用同一个比例收窄（见 ShuangpinImeService.applyKeyLayout），
+         * 所以这个常量是 public 的。
+         */
+        const val ONE_HAND_WIDTH_RATIO = 0.86f
+
         /** 退格键纵向滑动触发阈值（px）。 */
         private const val SWIPE_THRESHOLD = 60f
 
@@ -656,5 +935,8 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         private const val COLOR_BADGE = 0xFF7A8494.toInt()
         private const val COLOR_DEAD_TEXT = 0xFF7D8695.toInt()
         private const val COLOR_ACCENT = 0xFF2F6DF6.toInt()
+
+        /** 语音键的底色：淡蓝，一眼能看出跟别的功能键不一样。 */
+        private const val COLOR_VOICE_BG = 0xFFE3ECFF.toInt()
     }
 }

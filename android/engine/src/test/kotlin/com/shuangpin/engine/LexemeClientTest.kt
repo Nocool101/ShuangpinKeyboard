@@ -108,6 +108,7 @@ class LexemeClientTest {
         while (result == null && error == null && System.currentTimeMillis() < deadline) {
             Thread.sleep(100)
         }
+        assumeNotRateLimited(error)
         assertEquals("请求不该失败：$error", null, error)
         assertTrue("应该拿到下一词建议，实际=$result", !result.isNullOrEmpty())
         assertTrue("建议应该是 1~4 个汉字，实际=$result", result!!.all { it.length in 1..4 })
@@ -135,6 +136,7 @@ class LexemeClientTest {
         while (result == null && error == null && System.currentTimeMillis() < deadline) {
             Thread.sleep(100)
         }
+        assumeNotRateLimited(error)
         assertEquals("请求不该失败：$error", null, error)
         assertTrue("不该有池子外的词：$result", result!!.all { pool.contains(it) })
     }
@@ -165,7 +167,8 @@ class LexemeClientTest {
         val base = "http://127.0.0.1:${System.getProperty("lexeme.port") ?: "8787"}"
         assumeTrue("联想服务没起，跳过", serviceAlive(base))
 
-        val client = LexemeClient(base, onError = { })
+        var error: String? = null
+        val client = LexemeClient(base, onError = { msg -> error = msg })
         var first: List<String>? = null
         var second: List<String>? = null
         client.request(LexemeRequest(text = "你好")) { r -> first = r }
@@ -178,6 +181,7 @@ class LexemeClientTest {
         while ((first == null || second == null) && System.currentTimeMillis() < deadline) {
             Thread.sleep(100)
         }
+        assumeNotRateLimited(error)
         assertTrue("第一个请求要有结果", first != null)
         assertTrue("第二个请求不该被丢掉，实际=$second", second != null)
     }
@@ -355,6 +359,20 @@ class LexemeClientTest {
             server.close()
         }
         return ArrayList(bodies)
+    }
+
+    /**
+     * 云端限流（HTTP 429）**不是代码问题**——是额度用完了，等恢复再验。
+     *
+     * 服务端以前把上游所有错误一律转成 502，客户端只看到「服务坏了」，
+     * 测试也只能把限流当失败报出来，看着像代码坏了。
+     * 现在服务端会把上游的 429 透传下来，这里据此跳过——
+     * 真故障（502）仍然照常判失败，门禁不会因此放水。
+     */
+    private fun assumeNotRateLimited(error: String?) {
+        if (error != null && error.contains("429")) {
+            assumeTrue("云端限流（HTTP 429），等额度恢复再验", false)
+        }
     }
 
     private fun serviceAlive(base: String): Boolean = try {
