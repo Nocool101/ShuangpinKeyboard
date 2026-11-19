@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">双拼输入法</string>
+    <string name="ime_name">双拼输入法</string>
+    <string name="subtype_name">小鹤双拼</string>
+    <string name="space_commit">空格 上屏</string>
+    <string name="backspace">退格</string>
+    <string name="clear">清空</string>
+    <string name="settings_name">双拼输入法设置</string>
+</resources>

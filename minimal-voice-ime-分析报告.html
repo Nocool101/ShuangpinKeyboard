@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>极简语音输入法 · 项目分析报告</title>
+<style>
+  :root{
+    --bg:#0e1116; --bg2:#151a21; --card:#1a2029; --line:#28313d;
+    --tx:#e4e9f0; --tx2:#94a3b8; --tx3:#64748b;
+    --ac:#4ade80; --ac2:#22d3ee; --warn:#fbbf24; --dan:#f87171; --pur:#c084fc;
+    --mono:ui-monospace,"Cascadia Code","JetBrains Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--tx);font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;padding:0 0 80px}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 24px}
+
+  header{background:linear-gradient(135deg,#0e1116 0%,#16212b 55%,#0f1a16 100%);
+    border-bottom:1px solid var(--line);padding:44px 0 36px;margin-bottom:34px}
+  h1{font-size:29px;font-weight:650;letter-spacing:-.3px;margin-bottom:8px}
+  .sub{color:var(--tx2);font-size:14px}
+  .tags{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap}
+  .tag{background:#1d2732;border:1px solid var(--line);color:var(--tx2);
+    padding:3px 11px;border-radius:20px;font-size:12px;font-family:var(--mono)}
+  .tag.g{border-color:#1e4d33;color:var(--ac)} .tag.b{border-color:#1e3a4d;color:var(--ac2)}
+
+  h2{font-size:19px;font-weight:620;margin:38px 0 14px;padding-bottom:9px;
+    border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+  h2 .n{color:var(--ac);font-family:var(--mono);font-size:14px;font-weight:500}
+  h3{font-size:15px;font-weight:600;margin:22px 0 9px;color:#cdd6e2}
+  p{color:var(--tx2);margin:9px 0}
+  strong{color:var(--tx);font-weight:600}
+  code{font-family:var(--mono);font-size:12.5px;background:#202836;padding:1.5px 6px;
+    border-radius:4px;color:#8fd4ff;border:1px solid #2b3543}
+  .lead{color:var(--tx);font-size:15.5px;line-height:1.85}
+
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:repeat(2,1fr)} .g3{grid-template-columns:repeat(3,1fr)}
+  .g4{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:860px){.g2,.g3,.g4{grid-template-columns:1fr}}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:16px 18px}
+  .card h4{font-size:13.5px;font-weight:600;margin-bottom:7px;color:var(--tx)}
+  .card p{font-size:13.5px;margin:4px 0}
+  .kpi{background:var(--bg2);border:1px solid var(--line);border-radius:11px;padding:15px 17px}
+  .kpi .v{font-size:26px;font-weight:660;font-family:var(--mono);letter-spacing:-1px;line-height:1.2}
+  .kpi .l{font-size:12px;color:var(--tx3);margin-top:3px}
+  .kpi.ok .v{color:var(--ac)} .kpi.warn .v{color:var(--warn)}
+  .kpi.dan .v{color:var(--dan)} .kpi.info .v{color:var(--ac2)}
+
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px}
+  th{text-align:left;padding:9px 12px;background:#202836;color:var(--tx3);
+    font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;
+    border-bottom:1px solid var(--line)}
+  td{padding:9px 12px;border-bottom:1px solid #202836;color:var(--tx2);vertical-align:top}
+  tr:hover td{background:#1e252f}
+  td:first-child{color:var(--tx);font-weight:500}
+  .mono{font-family:var(--mono);font-size:12.5px;color:#8fd4ff}
+
+  /* flow diagram */
+  .flow{background:var(--bg2);border:1px solid var(--line);border-radius:13px;
+    padding:26px 20px;margin:16px 0;overflow-x:auto}
+  .frow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center}
+  .fbox{background:#202a36;border:1px solid #34404f;border-radius:9px;padding:9px 14px;
+    font-size:13px;text-align:center;min-width:96px}
+  .fbox em{display:block;font-style:normal;font-size:10.5px;color:var(--tx3);
+    font-family:var(--mono);margin-top:2px}
+  .fbox.hi{border-color:var(--ac);background:#16281d}
+  .fbox.cl{border-color:var(--ac2);background:#12242a}
+  .fbox.dg{border-color:var(--dan);background:#2a1618}
+  .fbox.wm{border-color:var(--warn);background:#2a2314}
+  .arrow{color:var(--tx3);font-size:17px;font-family:var(--mono)}
+  .flabel{font-size:11px;color:var(--tx3);text-align:center;font-family:var(--mono);margin:3px 0}
+  .fsep{width:100%;text-align:center;color:var(--tx3);font-size:11px;
+    font-family:var(--mono);margin:14px 0 10px;letter-spacing:2px}
+  .fsep::before,.fsep::after{content:"· · ·";margin:0 10px;color:#33404f}
+
+  .risk{border-left:3px solid var(--dan);background:#1c1618;border-radius:0 9px 9px 0;
+    padding:13px 16px;margin:11px 0}
+  .risk.p1{border-color:var(--warn);background:#1c1a14}
+  .risk.p2{border-color:var(--ac2);background:#131d22}
+  .risk.p3{border-color:var(--tx3);background:#1a1e24}
+  .risk .h{font-weight:640;font-size:14px;color:var(--tx);margin-bottom:5px;
+    display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .risk .h .lv{font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:4px;
+    background:#3a2024;color:var(--dan);letter-spacing:.5px}
+  .risk.p1 .h .lv{background:#3d3316;color:var(--warn)}
+  .risk.p2 .h .lv{background:#16323b;color:var(--ac2)}
+  .risk.p3 .h .lv{background:#2a3038;color:var(--tx3)}
+  .risk p{font-size:13.5px;margin:5px 0}
+  .risk .loc{font-family:var(--mono);font-size:11.5px;color:#7c8b9c}
+
+  .bar{height:7px;background:#252d38;border-radius:4px;overflow:hidden;margin-top:5px}
+  .bar i{display:block;height:100%;border-radius:4px}
+  .foot{margin-top:46px;padding-top:20px;border-top:1px solid var(--line);
+    color:var(--tx3);font-size:12.5px}
+  .pill{display:inline-block;padding:1px 7px;border-radius:4px;font-size:11.5px;
+    font-family:var(--mono);font-weight:500}
+  .pill.p0{background:#3a2024;color:#fca5a5} .pill.p1{background:#3d3316;color:#fcd34d}
+  .pill.p2{background:#16323b;color:#67e8f9} .pill.p3{background:#2a3038;color:#94a3b8}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>极简语音输入法 <span style="color:var(--tx3);font-weight:400">Minimal Voice IME</span></h1>
+    <div class="sub">项目分析报告 · 静态代码审查 · <code>C:\works\ShuRuFa\minimal-voice-ime-main</code></div>
+    <div class="tags">
+      <span class="tag g">versionCode 163 / v0.6.60</span>
+      <span class="tag">Android minSdk 26 · targetSdk 34</span>
+      <span class="tag">arm64-v8a only</span>
+      <span class="tag">Gradle 8.7 · AGP 8.4.0 · JDK 17</span>
+      <span class="tag b">MIT License</span>
+      <span class="tag">librime 1.16.1 + sherpa-onnx + llama.cpp</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">01</span>项目定位</h2>
+  <p class="lead">
+    一个 <strong>只占一条窄语音栏</strong>的安卓输入法。按住说话 → 流式出字 → AI 整理 → 点一下发送；
+    需要手打时按 ABC 展开全键盘（走离线 Rime 拼音）。识别与整理各自提供
+    <strong>云端（阿里云百炼）与本地（sherpa-onnx / llama.cpp）</strong>两套完整实现，可整条链路离线。
+  </p>
+  <p>
+    产品定位清晰且有差异化：核心主张是「省屏幕 + 不打扰」，作者把它定义为「不占屏幕的安卓语音输入法」。
+    技术上是一个 <strong>双引擎（语音 + 拼音）三链路（云端/本地/降级）</strong> 的复合型输入法，
+    难点不在 UI，而在链路编排、状态机与资源生命周期。
+  </p>
+
+  <div class="grid g4" style="margin-top:18px">
+    <div class="kpi ok"><div class="v">43.4K</div><div class="l">Java 源码行数 (33 个文件)</div></div>
+    <div class="kpi info"><div class="v">36.5 MB</div><div class="l">jniLibs 原生库</div></div>
+    <div class="kpi warn"><div class="v">6.9 MB</div><div class="l">assets 资源(首启复制 ~6.5MB)</div></div>
+    <div class="kpi dan"><div class="v">0</div><div class="l">单元测试 / CI / 静态检查</div></div>
+  </div>
+
+  <h2><span class="n">02</span>架构总览</h2>
+
+  <div class="flow">
+    <div class="flabel">主链路 · 语音输入</div>
+    <div class="frow">
+      <div class="fbox">按下语音键<em>MinimalVoiceIME:2086</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">AudioRecorder<em>16kHz 单声道 PCM16</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox hi">AsrEngine<em>5 个实现</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">onPartial/onFinal<em>IME:2169</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox cl">TextPolisher<em>AI 整理</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox hi">上屏<em>setComposingText</em></div>
+    </div>
+
+    <div class="fsep"></div>
+
+    <div class="flabel">引擎选择 · createEngine()　MinimalVoiceIME.java:2431</div>
+    <div class="frow">
+      <div class="fbox wm">PROTOCOL_LOCAL<em>LocalAsrEngine</em></div>
+      <div class="fbox wm">PROTOCOL_BAILIAN<em>百炼域名 → Realtime</em></div>
+      <div class="fbox wm">PROTOCOL_BAILIAN<em>其他域名 → 整段 HTTP</em></div>
+      <div class="fbox wm">PROTOCOL_WS<em>WsAsrEngine</em></div>
+      <div class="fbox wm">默认<em>HttpAsrEngine</em></div>
+    </div>
+
+    <div class="fsep"></div>
+
+    <div class="flabel">降级链</div>
+    <div class="frow">
+      <div class="fbox dg">Realtime WS 失败<em>RealtimeAsrEngine:322</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">换模型 qwen3-asr-flash<em>:310</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">BailianAsrEngine 整段上传<em>:322</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">失败 → 保留 PCM 可重试<em>IME:2310</em></div>
+    </div>
+
+    <div class="fsep"></div>
+
+    <div class="flabel">副链路 · 离线拼音</div>
+    <div class="frow">
+      <div class="fbox">字母键<em>composing</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">后台线程 + 35ms 防抖<em>IME:1705</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox hi">RimeEngine.candidates<em>librime simulateKeySequence</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">候选条重排<em>词频 + 个人词库优先</em></div>
+      <div class="arrow">→</div>
+      <div class="fbox">上屏 + 记词频</div>
+    </div>
+  </div>
+
+  <h2><span class="n">03</span>模块清单</h2>
+  <table>
+    <thead><tr><th>模块 / 类</th><th>职责</th><th>规模</th><th>评价</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">service/MinimalVoiceIME</td><td>输入法本体：按键、全键盘、候选渲染、录音、状态机</td><td>2472 行</td><td><span class="pill p2">上帝类</span></td></tr>
+      <tr><td class="mono">ui/SettingsActivity</td><td>设置页全部：ASR 诊断、模型下拉、同步、更新、词库、主题</td><td>3584 行 / 180KB</td><td><span class="pill p2">上帝类</span></td></tr>
+      <tr><td class="mono">asr/* (14 个)</td><td>5 个识别引擎 + 整理 + 专名校正 + 繁简归一</td><td>~2900 行</td><td><span class="pill p0">有并发缺陷</span></td></tr>
+      <tr><td class="mono">input/RimeEngine</td><td>librime 薄封装 + 邻键纠错 + DP 音节切分</td><td>302 行</td><td>设计良好</td></tr>
+      <tr><td class="mono">rime/ (Kotlin+JNI)</td><td>librime 封装模块</td><td>~1500 行</td><td><span class="pill p2">Kotlin 侧全死代码</span></td></tr>
+      <tr><td class="mono">data/*</td><td>快捷输入、个人词库、词频、剪贴板历史</td><td>~470 行</td><td>结构重复 3 次</td></tr>
+      <tr><td class="mono">sync/LanSyncManager</td><td>UDP 广播发现 + TCP 传输词库</td><td>476 行</td><td><span class="pill p0">明文传 Key</span></td></tr>
+      <tr><td class="mono">ui/ 自绘层</td><td>Waveform / Marquee / ProgressRing 三件套</td><td>~400 行</td><td>亮点</td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="n">04</span>设计亮点</h2>
+  <div class="grid g2">
+    <div class="card">
+      <h4>① 候选计算的版本号机制</h4>
+      <p>每轮候选带一个自增 <code>candVersion</code>，任何阶段发现版本不匹配就整体丢弃。
+      配合 35ms 防抖与单线程池，连续敲键只算最后一串，旧结果绝不会覆盖新结果。</p>
+      <p style="color:#8fd4ff;font-family:var(--mono);font-size:12px">IME.java:1705-1733</p>
+    </div>
+    <div class="card">
+      <h4>② 整理令牌防止幽灵回填</h4>
+      <p>每轮 AI 整理持一个 <code>polishToken</code>。用户中途发送或重新识别时令牌作废，
+      后台结果回来直接丢弃，不会把整理文本插回已被改动的输入框。</p>
+      <p style="color:#8fd4ff;font-family:var(--mono);font-size:12px">IME.java:2601-2636</p>
+    </div>
+    <div class="card">
+      <h4>③ 失败重试不丢录音</h4>
+      <p>录音 PCM 全程缓存（上限 120 秒），网络失败后点一下中间键即可用缓存音频重转，
+      无需重新说话。重试时自动从实时 WS 切到整段上传。</p>
+      <p style="color:#8fd4ff;font-family:var(--mono);font-size:12px">IME.java:2236-2299</p>
+    </div>
+    <div class="card">
+      <h4>④ 音节 DP 切分做纠错校验</h4>
+      <p>用 405 个合法音节做动态规划切分，只有能完整切开的纠错变体才被采纳，
+      避免邻键替换产生垃圾候选。</p>
+      <p style="color:#8fd4ff;font-family:var(--mono);font-size:12px">RimeEngine.java:296-322</p>
+    </div>
+    <div class="card">
+      <h4>⑤ librime 双层纠错</h4>
+      <p>Rime 规则层（spelling_correction / key_correction）+ Java 层（QWERTY 邻键替换、
+      删位、相邻换位）叠加，覆盖 zh/z、ang/an、n/l 等常见混淆。</p>
+      <p style="color:#8fd4ff;font-family:var(--mono);font-size:12px">pinyin.yaml:130-145</p>
+    </div>
+    <div class="card">
+      <h4>⑥ 专有名词双保险</h4>
+      <p>词表既注入 LLM 的 system prompt 作约束，整理完再用 <code>TermFix</code> 本地做
+      子串替换与编辑距离校正，保证人名公司名不被改写。</p>
+      <p style="color:#8fd4ff;font-family:var(--mono);font-size:12px">TextPolisher:232 / TermFix:75</p>
+    </div>
+  </div>
+
+  <h2><span class="n">05</span>问题与风险</h2>
+
+  <div class="risk">
+    <div class="h"><span class="lv">P0</span>API Key 明文存储，且局域网同步明文外传</div>
+    <p>API Key 明文存于 SharedPreferences（<code>Prefs.java:88</code>），未用 EncryptedSharedPreferences 或
+    Android Keystore。更严重的是局域网同步的「asr」分组会把 <code>asr_api_key</code>、
+    <code>polish_key</code> 一起放进 payload，经 <strong>无 TLS 的 TCP 明文</strong> 发出
+    （<code>LanSyncManager.java:466/512</code>）。同 WiFi 可被嗅探。</p>
+    <p>另有 401 错误提示回显 Key 长度与尾号 4 位（<code>BailianAsrEngine.java:300</code>），可被截图。</p>
+  </div>
+
+  <div class="risk">
+    <div class="h"><span class="lv">P0</span>局域网同步存在越权覆盖</div>
+    <p>接收端完全信任<strong>发送方</strong>声明的分组，本机勾选不参与校验（<code>Prefs.java:327-352</code>）。
+    用户一旦点「接收」，对方即可覆盖 <code>asr_endpoint</code> 与 <code>asr_api_key</code>，
+    把后续所有语音转写与整理请求导向攻击者地址 —— 这是典型的 DNS/端点劫持。
+    配对码为 4 位且随 UDP announce 明文广播，同网段可直接获取。</p>
+  </div>
+
+  <div class="risk">
+    <div class="h"><span class="lv">P1</span>HttpAsrEngine 缓冲区竞态</div>
+    <p><code>feed()</code> 无同步写 <code>buffer</code>，而 <code>finish()</code> 在另一线程并发读
+    （<code>HttpAsrEngine.java:56-64</code>）。同场景 <code>BailianAsrEngine</code> 已用 synchronized，
+    说明这是遗漏而非有意为之，会造成丢帧或数组越界。</p>
+  </div>
+
+  <div class="risk">
+    <div class="h"><span class="lv">P1</span>取消后兜底请求仍在上传</div>
+    <p><code>RealtimeAsrEngine.fallback()</code> 中的兜底引擎是<strong>局部变量</strong>
+    （<code>RealtimeAsrEngine.java:339</code>），父类 <code>cancel()</code> 只关闭 socket。
+    用户上滑取消后，兜底 HTTP 仍会继续把音频上传完毕。</p>
+  </div>
+
+  <div class="risk">
+    <div class="h"><span class="lv">P1</span>每次录音都新建 OkHttpClient 且从不关闭</div>
+    <p>四个引擎各自 <code>new OkHttpClient()</code>（<code>Realtime:38 / Bailian:45 / Http:41 / Ws:36</code>），
+    dispatcher 与连接池从不 shutdown，每次录音泄漏线程。这是长跑场景下的稳定累积型泄漏。</p>
+  </div>
+
+  <div class="risk">
+    <div class="h"><span class="lv">P1</span>整理耗时计算跑在主线程</div>
+    <p><code>clean()</code> → <code>TermFix.apply</code> 在主线程执行逐窗口编辑距离校正，
+    每次都重新分配 DP 矩阵（<code>TermFix.java:115-133</code>）。长文本 + 大词表会掉帧。
+    <code>tidyPunctuation</code> 的多条正则同样在主线程。</p>
+  </div>
+
+  <div class="risk">
+    <div class="h"><span class="lv">P2</span>rime 模块的 Kotlin 层是完整死代码</div>
+    <p><code>Rime.kt</code> / <code>RimeDispatcher.kt</code> / <code>RimeKeyMapper.kt</code> /
+    <code>RimeMessage.kt</code> / <code>X11Keys.kt</code> 互相引用形成闭环，主程序只 import
+    <code>RimeApi</code> 与 <code>RimeCandidate</code>。实际生效的是「Java static + 全局 LOCK」这条并行路径。
+    <code>X11Keys</code> 的 135 行 keysym 常量因走 <code>simulateKeySequence</code> 完全用不上。
+    这套协程/Flow 通道还额外拖进了 kotlinx-coroutines 依赖。</p>
+  </div>
+
+  <div class="risk p2">
+    <div class="h"><span class="lv">P2</span>蓝牙链路整条已停用但留有残迹</div>
+    <p><code>MinimalVoiceIME.java:2135</code> 硬编码 <code>boolean bt = false</code>，
+    <code>enterSco</code> / <code>hasBluetoothMic</code> 全项目无调用点。
+    但 <code>leaveSco</code> 仍在 2388 / 2416 行无条件调用，会把音频模式重置为 MODE_NORMAL。</p>
+  </div>
+
+  <div class="risk p2">
+    <div class="h"><span class="lv">P2</span>本地模型下载仅校验文件长度</div>
+    <p><code>LocalModelManager</code> 只比对文件长度阈值（≥90%，自定义档 ≥98%），
+    <strong>无 sha256 校验</strong>（<code>LocalModelManager.java:150-157</code>）。
+    截断或被替换的模型文件会被判为就位，仅靠事后 <code>probe()</code> 兜底。
+    下载源硬编码 hf-mirror 镜像，境外不可用。</p>
+  </div>
+
+  <div class="risk p2">
+    <div class="h"><span class="lv">P2</span>零测试 + 两个上帝类</div>
+    <p>无 <code>src/test</code>、无 <code>androidTest</code>、无 CI、无 lint 配置，
+    build.gradle 里连 junit 依赖都没有。而 <code>PhraseParser</code>、<code>PhraseStore.matchIn</code>、
+    <code>Prefs.addTokens</code> 都是纯逻辑、本可被测。
+    <code>SettingsActivity</code> 3584 行混合了至少 15 个独立领域；<code>MinimalVoiceIME</code> 2472 行
+    混合了 IME 生命周期、按键、候选、录音、引擎选择、整理、剪贴板、词库。</p>
+  </div>
+
+  <div class="risk p3">
+    <div class="h"><span class="lv">P3</span>资产冗余与文档不一致</div>
+    <p><code>assets/pinyin_words.txt</code>（464 KB / 25,666 行）<strong>全仓无任何代码引用</strong>，
+    已用 grep 确认。README 称其为「辅助简拼」并说「自带 2.5 万词的词表」，
+    但真正的简拼能力来自 Rime 的 <code>abbreviation</code> 规则，而真实词库是 luna 词典的 43,837 条。
+    README 同时没有提到 <code>assets/rime</code> 会在首次启动被完整复制到 filesDir（约 6.5 MB）。</p>
+  </div>
+
+  <div class="risk p3">
+    <div class="h"><span class="lv">P3</span>其他细节</div>
+    <p>· <code>uploadWithRetry</code> 对 401/400 参数错误也重试一次（<code>BailianAsrEngine.java:147</code>）<br>
+    · Whisper 分支注释称「language 留空让它自己判」，代码却写死 <code>setLanguage("zh")</code><br>
+    · <code>copyAssets</code> 遇已存在非空文件即跳过，应用升级后词库/schema 变更不会生效（<code>RimeEngine.java:94</code>）<br>
+    · <code>Boost.cmake</code> 的 boost 路径写死 POSIX 绝对路径 <code>/tmp/boostroot</code>，Windows 构建受阻<br>
+    · librime-predict 走 master.zip 且 sha256 设为 <code>bypass</code>，无校验无版本固定<br>
+    · <code>AsrConfig.load</code> 中 bailian 分支与 fallthrough 分支代码完全相同（<code>AsrConfig.java:67-77</code>）</p>
+  </div>
+
+  <h2><span class="n">06</span>质量指标</h2>
+  <div class="grid g2">
+    <div class="card">
+      <h4>工程规范</h4>
+      <p style="margin-bottom:9px">提交历史清晰，CHANGELOG 逐版本记录到 0.6.60（约 60 个版本）。
+      迭代节奏密集，每版都有明确的功能或修复目标，作者对细节的打磨程度相当高
+      （如「读到模型列表时排除 max/pro/plus/turbo 等付费档位」「百炼域名收紧为白名单」）。</p>
+      <p><strong>短板：</strong>零测试、零 CI、零静态检查，没有任何自动化质量闸门。</p>
+    </div>
+    <div class="card">
+      <h4>可维护性</h4>
+      <p style="margin-bottom:9px">资源与逻辑分离得不错：词库在 assets、配置在 Prefs、
+      模型在 filesDir。三个 Store 结构完全一致（Gson + filesDir JSON + 静态 cache + 全量重写 + 吞异常），
+      可抽 <code>BaseJsonStore</code>。同步的导出/导入是两份平行 if-chain，加键要改两处。</p>
+      <p><strong>可抽公共层：</strong>BaseJsonStore、TokenLedger、DialogBuilder、单例 OkHttpClient。</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:26px">代码量分布（Java，行）</h3>
+  <table>
+    <thead><tr><th>文件</th><th style="width:70%">占比</th><th style="width:80px;text-align:right">行数</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">ui/SettingsActivity.java</td><td><div class="bar"><i style="width:100%;background:#f87171"></i></div></td><td style="text-align:right" class="mono">3584</td></tr>
+      <tr><td class="mono">service/MinimalVoiceIME.java</td><td><div class="bar"><i style="width:69%;background:#fbbf24"></i></div></td><td style="text-align:right" class="mono">2472</td></tr>
+      <tr><td class="mono">sync/LanSyncManager.java</td><td><div class="bar"><i style="width:13%;background:#4ade80"></i></div></td><td style="text-align:right" class="mono">476</td></tr>
+      <tr><td class="mono">asr/ 全部 (14 个文件)</td><td><div class="bar"><i style="width:12%;background:#4ade80"></i></div></td><td style="text-align:right" class="mono">~2900</td></tr>
+      <tr><td class="mono">settings/Prefs.java</td><td><div class="bar"><i style="width:10%;background:#4ade80"></i></div></td><td style="text-align:right" class="mono">364</td></tr>
+      <tr><td class="mono">input/RimeEngine.java</td><td><div class="bar"><i style="width:8%;background:#4ade80"></i></div></td><td style="text-align:right" class="mono">302</td></tr>
+      <tr><td class="mono">ui/ 其余 7 个</td><td><div class="bar"><i style="width:14%;background:#22d3ee"></i></div></td><td style="text-align:right" class="mono">~610</td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="n">07</span>改进路线建议</h2>
+  <div class="grid g3">
+    <div class="card">
+      <h4>立即处理 · 安全</h4>
+      <p>① API Key 迁入 <code>EncryptedSharedPreferences</code><br>
+      ② 同步 payload 默认剔除 Key，或改端到端加密<br>
+      ③ 接收端校验发送方声明的分组，不允许越权覆盖<br>
+      ④ 移除 401 提示里的 Key 尾号回显<br>
+      ⑤ 本地模型下载补 sha256</p>
+    </div>
+    <div class="card">
+      <h4>短期 · 稳定性</h4>
+      <p>① <code>HttpAsrEngine</code> buffer 加 synchronized<br>
+      ② 兜底引擎提为字段并在 cancel 中取消<br>
+      ③ 四个引擎共用单例 OkHttpClient，服务销毁时 shutdown<br>
+      ④ <code>TermFix</code> 移到后台线程<br>
+      ⑤ 清理蓝牙残迹与死代码</p>
+    </div>
+    <div class="card">
+      <h4>中期 · 工程化</h4>
+      <p>① 补单元测试（PhraseParser / Prefs / RimeEngine）<br>
+      ② 拆分两个上帝类<br>
+      ③ 抽 BaseJsonStore / TokenLedger / DialogBuilder<br>
+      ④ 加 CI + lint + 混淆规则<br>
+      ⑤ 删 pinyin_words.txt 并订正 README</p>
+    </div>
+  </div>
+
+  <div class="foot">
+    报告基于对仓库全部 33 个 Java 源文件、7 个 Kotlin 源文件、14 个 CMake 脚本与资源文件的静态阅读生成，
+    并对关键结论（资产引用、跨模块调用点、体积构成、词库条数）做了 grep 与实测交叉验证。
+    <strong>本次分析未执行 Gradle 构建、未在设备上运行</strong>，因此所有运行时行为结论均基于源码推断，未经真机验证。
+  </div>
+
+</div>
+</body>
+</html>

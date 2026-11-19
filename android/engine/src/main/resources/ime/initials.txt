@@ -1,0 +1,7 @@
+# scheme	声母	键位
+initial	xiaohe	zh	v
+initial	xiaohe	ch	i
+initial	xiaohe	sh	u
+initial	ziranma	zh	v
+initial	ziranma	ch	x
+initial	ziranma	sh	u

@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      云端「下一词」预测、纠错要联网。没有设置界面时用 ConfigureReceiver 配端点。
+      INTERNET 是普通权限，装的时候不问用户。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      语音输入（按住空格说话）要开麦克风。
+      这是危险权限，要在设置页里让用户点一下授权。
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+      自建的联想服务常常跑在局域网里（http://192.168.x.x），
+      而 Android 9 起默认禁止明文 HTTP——不放开的话请求会被系统直接拦掉，
+      表现是「联想永远没结果」。
+      产品化建议：自己的服务走 HTTPS，再把这里改回 false。
+    -->
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true">
+
+        <!--
+          开发用的配置入口：开云端联想、配端点。
+          不导出，别的 App 不能偷偷打开云端联想。
+        -->
+        <receiver
+            android:name=".ConfigureReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.shuangpin.ime.CONFIGURE" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          设置页。
+          exported 必须 true：系统的输入法设置（长按地球键 → 设置）是从别的 App
+          拉起它的，exported=false 会被系统拦下来。
+          没有 intent-filter，所以只能被显式启动。
+        -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:label="@string/settings_name"
+            android:theme="@android:style/Theme.Material.Light" />
+
+        <!--
+          输入法服务。exported 必须为 true（Android 12+ 强制），
+          permission 限制只有系统能绑定，这是所有 IME 的标准做法。
+        -->
+        <service
+            android:name=".ShuangpinImeService"
+            android:exported="true"
+            android:label="@string/ime_name"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:theme="@style/ImeTheme">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+            <!--
+              系统「输入法设置」里的入口就指向这里，
+              这是 Android 声明输入法设置页的标准做法。
+            -->
+            <meta-data
+                android:name="android.settingsActivity"
+                android:value="com.shuangpin.ime.SettingsActivity" />
+        </service>
+
+    </application>
+
+</manifest>

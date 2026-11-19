@@ -1,0 +1,3 @@
+# scheme	方案名
+scheme	xiaohe	小鹤双拼
+scheme	ziranma	自然码双拼

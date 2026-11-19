@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      输入法窗口的主题。
+
+      windowSoftInputMode 必须是 adjustResize：
+      框架给输入法窗口的默认是 adjust=pan，运行时 setSoftInputMode 也会被覆盖，
+      只有在主题里声明才生效。adjust=pan 的后果是宿主应用（比如地址栏在底部的
+      Via 浏览器）根本不缩放窗口，输入框被键盘盖住。
+    -->
+    <style name="ImeTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowSoftInputMode">adjustResize</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

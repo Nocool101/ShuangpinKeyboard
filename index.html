@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>双拼输入法原型 · 26键双层标签 + 韵母候选</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --page:#eceef3; --card:#fff; --ink:#171b23; --sub:#5b6472; --muted:#98a1b0;
+    --line:#e3e6ec; --accent:#2f6df6; --accent-soft:#e9f0ff; --warn:#e8703a;
+    --key:#ffffff; --key-shadow:#d7dbe3; --ime-bg:#e9ebf0;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:var(--page); color:var(--ink); -webkit-font-smoothing:antialiased;
+    padding:28px 20px 60px; line-height:1.55;
+  }
+  .wrap{max-width:1080px;margin:0 auto}
+
+  /* ---------- page header ---------- */
+  header.page-hd{margin-bottom:22px}
+  .kicker{font-size:12px;letter-spacing:.14em;color:var(--accent);font-weight:700;text-transform:uppercase}
+  h1{font-size:27px;font-weight:800;letter-spacing:-.02em;margin:6px 0 8px}
+  .lede{color:var(--sub);font-size:15px;max-width:74ch}
+  .ctrlbar{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px;align-items:center}
+  .ctl{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);
+       border-radius:999px;padding:6px 8px 6px 14px;font-size:13px}
+  .ctl label{color:var(--muted);font-weight:600}
+  select,button.tgl{
+    font:inherit;font-size:13px;font-weight:600;border:1px solid var(--line);background:#f7f8fa;
+    border-radius:999px;padding:5px 12px;color:var(--ink);cursor:pointer
+  }
+  button.tgl.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.tgl:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* ---------- layout ---------- */
+  .stage{display:grid;grid-template-columns:minmax(0,430px) minmax(0,1fr);gap:28px;align-items:start}
+  @media (max-width:880px){.stage{grid-template-columns:1fr}}
+
+  /* ---------- phone ---------- */
+  .phone{
+    width:430px;background:#0d1017;border-radius:44px;padding:12px;
+    box-shadow:0 30px 60px -18px rgba(18,24,38,.45),0 0 0 1px rgba(255,255,255,.05) inset;
+  }
+  .screen{background:#fff;border-radius:34px;overflow:hidden;display:flex;flex-direction:column;height:706px}
+  .statusbar{height:26px;display:flex;align-items:center;justify-content:space-between;
+             padding:0 22px;font-size:11px;color:#333;font-weight:600}
+  .appbar{height:44px;display:flex;align-items:center;padding:0 16px;font-size:15px;font-weight:700;
+          border-bottom:1px solid #f0f1f4;gap:8px}
+  .appbar .dot{width:9px;height:9px;border-radius:50%;background:#ff5f57}
+  .editor{flex:1;min-height:90px;padding:18px 18px 12px;font-size:17px;line-height:1.9;color:#1a1e26;
+          overflow:auto;word-break:break-all}
+  .editor .comp{color:var(--accent);border-bottom:2px solid var(--accent);padding-bottom:1px}
+  .editor .ph{color:#c3c8d2}
+  .editor .cursor{display:inline-block;width:2px;height:18px;background:var(--accent);
+                 vertical-align:-3px;animation:blink 1.1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* ---------- ime ---------- */
+  .ime{background:var(--ime-bg);border-top:1px solid #dcdfe6;display:flex;flex-direction:column}
+  .hintbar{display:flex;align-items:center;gap:8px;padding:7px 14px;font-size:12px;color:var(--sub);
+           background:#f4f6fa;border-bottom:1px solid #e2e5ec;min-height:30px}
+  .hintbar .st{display:inline-flex;align-items:center;gap:5px;font-weight:700;color:var(--accent);
+               background:var(--accent-soft);border-radius:5px;padding:2px 7px;font-size:11px;
+               letter-spacing:.02em}
+  .hintbar .st.s2{background:#fdeee7;color:var(--warn)}
+  .hintbar .st.s0{background:#e7f6ec;color:#1f8a4c}
+  .hintbar .code{font-family:var(--mono);font-weight:700;color:var(--ink);letter-spacing:.08em}
+  .hintbar .rest{color:var(--muted);margin-left:auto;font-size:11px}
+
+  .candbar{display:flex;gap:5px;overflow-x:auto;padding:7px 8px;background:#f4f6fa;
+           scrollbar-width:none;min-height:56px;align-items:center;
+           -webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 26px),transparent 100%);
+           mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 26px),transparent 100%)}
+  .candbar::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto;background:#fff;border:1px solid #dfe3ea;border-radius:8px;padding:4px 8px;
+        cursor:pointer;display:flex;align-items:center;gap:5px;line-height:1.25;transition:.12s}
+  .chip:hover{border-color:var(--accent);background:var(--accent-soft)}
+  .chip .big{font-size:18px;font-weight:700}
+  .chip .py{font-size:10px;color:var(--muted);font-family:var(--mono)}
+  .chip .cnt{font-size:11px;color:var(--muted)}
+  .chip .ck{font-family:var(--mono);font-size:9.5px;font-weight:700;color:#fff;background:var(--accent);
+            border-radius:4px;padding:1px 4px;letter-spacing:.02em}
+  .chip .cf{font-size:12.5px;font-weight:700;color:var(--accent)}
+  .chip .cs{font-size:15px;font-weight:700}
+  .chip.phrase{background:#fff8e8;border-color:#f0dcae}
+  .chip.phrase .big{color:#a8620a}
+  .chip.hint{background:transparent;border:none;color:var(--muted);font-size:12px;cursor:default;padding-left:2px}
+  .chip.hint:hover{border:none;background:transparent}
+
+  .keys{padding:6px 6px 10px;display:flex;flex-direction:column;gap:6px}
+  .krow{display:flex;gap:4px;justify-content:center}
+  .key{
+    flex:0 0 auto;width:calc((100% - 36px)/10);height:46px;border-radius:8px;background:var(--key);
+    border:1px solid #d8dce4;box-shadow:0 1px 0 #c6cbd4;cursor:pointer;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;
+    transition:background .12s,border-color .12s,transform .06s;user-select:none
+  }
+  .key:active{transform:translateY(1px);box-shadow:none}
+  .key .big{font-size:15px;font-weight:700;line-height:1.1;white-space:nowrap}
+  .key .small{font-size:8.5px;color:var(--muted);line-height:1.1;margin-top:2px;white-space:nowrap;
+              width:100%;text-align:center;overflow:hidden;text-overflow:clip;letter-spacing:-.15px}
+  .key .small.long{font-size:7.6px;letter-spacing:-.35px}
+  .key .big.ghost{font-size:8px;font-weight:600;color:#98a1b0;letter-spacing:-.3px;width:100%;
+                  text-align:center;overflow:hidden;text-overflow:clip}
+  .key.lit{border-color:var(--accent);background:#fff;box-shadow:0 0 0 2px var(--accent-soft),0 1px 0 #c6cbd4}
+  .key.lit .big{color:var(--accent);font-size:14px}
+  .key.lit .small{color:var(--accent);opacity:.75;font-weight:700}
+  .key.dead{background:#e2e5ea;border-color:#d8dce4;box-shadow:none;opacity:.42;cursor:default}
+  .key.dead .big{color:#7d8695}
+  .key.dead .small{opacity:.6}
+  .key.chosen{background:var(--accent);border-color:var(--accent)}
+  .key.chosen .big,.key.chosen .small{color:#fff}
+  .key.wide{width:auto;padding:0 14px;flex:1 1 auto;max-width:150px}
+  .key.fn{height:40px}
+  .key.fn .big{font-size:13px;color:var(--sub)}
+  .key.fn:active .big{color:var(--accent)}
+
+  /* ---------- side panel ---------- */
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin-bottom:16px}
+  .panel h3{font-size:15px;font-weight:800;margin-bottom:10px;letter-spacing:-.01em}
+  .panel p,.panel li{font-size:13.5px;color:var(--sub)}
+  .panel ul{padding-left:18px}
+  .panel li{margin:5px 0}
+  .panel b{color:var(--ink)}
+  .tag{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:999px;
+       background:var(--accent-soft);color:var(--accent);margin-left:6px;vertical-align:2px}
+  .tag.warn{background:#fdeee7;color:var(--warn)}
+  table{border-collapse:collapse;width:100%;font-size:12.5px}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:11.5px}
+  td code,code{font-family:var(--mono);background:#f4f6fa;border-radius:4px;padding:1px 5px;font-size:12px}
+  .legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px 18px;
+          font-size:12.5px;color:var(--sub)}
+  .legend div{display:flex;gap:8px;align-items:baseline}
+  .legend b{font-family:var(--mono);color:var(--ink);min-width:62px;font-size:12px}
+  .checkrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .ckc{font-family:var(--mono);font-size:11.5px;background:#f4f6fa;border:1px solid var(--line);
+       border-radius:6px;padding:3px 7px;color:var(--sub)}
+  .ckc.ok{border-color:#b9e2c8;background:#eaf7ef;color:#1f7a46}
+  .ckc.bad{border-color:#f0c3b3;background:#fdefe8;color:#b34a1d}
+  .footnote{font-size:12px;color:var(--muted);margin-top:10px}
+  hr.sep{border:none;border-top:1px dashed var(--line);margin:12px 0}
+  .flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--sub)}
+  .flow b{font-family:var(--mono);background:#f4f6fa;border-radius:5px;padding:2px 7px;color:var(--ink);font-size:12px}
+  .flow i{font-style:normal;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page-hd">
+    <div class="kicker">Android IME · 双拼方案原型</div>
+    <h1>26 键常驻 · 双层标签 · 第二阶段只换标签不换布局</h1>
+    <p class="lede">
+      核心主张：双拼的 26 个键是<strong>声母位 / 韵母位两用</strong>的，所以不做「换一块键盘」，而是在同一块板上换标签。
+      按下声母后，物理位置不变、音位不变，只有可用韵母键高亮、无效键变灰——这样用户的第二阶段动作和双拼肌肉记忆是同一套。
+    </p>
+    <div class="ctrlbar">
+      <div class="ctl"><label>双拼方案</label>
+        <select id="schemeSel">
+          <option value="xiaohe">小鹤双拼</option>
+          <option value="ziranma">自然码双拼</option>
+        </select>
+      </div>
+      <div class="ctl"><label>界面模式</label>
+        <button class="tgl on" id="modeVisual">可视化（双层标签）</button>
+        <button class="tgl" id="modePlain">纯连打（只看字母）</button>
+      </div>
+      <div class="ctl"><label>辅助</label>
+        <button class="tgl on" id="tglHint">显示韵母键位</button>
+        <button class="tgl on" id="tglPreview">候选预览字</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="stage">
+    <!-- ================= PHONE ================= -->
+    <div class="phone">
+      <div class="screen">
+        <div class="statusbar"><span>9:41</span><span>●●● ⌁ 100%</span></div>
+        <div class="appbar"><span class="dot"></span> 备忘录 <span style="margin-left:auto;font-weight:500;color:#9aa2b1;font-size:12px">原型</span></div>
+        <div class="editor" id="editor"></div>
+        <div class="ime">
+          <div class="hintbar" id="hintbar"></div>
+          <div class="candbar" id="candbar"></div>
+          <div class="keys" id="keys"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= PANELS ================= -->
+    <div>
+      <div class="panel">
+        <h3>交互流程</h3>
+        <div class="flow">
+          <b>按 b</b><i>→</i><b>高亮 16 个可用韵母键</b><i>→</i><b>按 d</b><i>→</i><b>音节 bai</b><i>→</i><b>空格/点词上屏</b>
+        </div>
+        <p style="margin-top:10px">第二阶段按下的仍然是<strong>物理键</strong>。看得到「d = ai」，也按得到 d，两个目标同时满足：
+          新手记住了映射，老手没被打断节奏。</p>
+      </div>
+
+      <div class="panel">
+        <h3>引擎已经把歧义解掉了 <span class="tag">这是本方案的核心价值</span></h3>
+        <p>小鹤有 9 个键对应两个韵母（<code>k</code>=ing/uai、<code>s</code>=ong/iong、<code>x</code>=ia/ua、<code>l</code>=iang/uang、
+          <code>o</code>=o/uo、<code>v</code>=ü/ui、<code>y</code>=un/ün、<code>t</code>=üe、<code>r</code>=uan）。
+          声母一旦确定，这些歧义<strong>全部可以靠音节合法性唯一消解</strong>——普通双拼里用户按 <code>k</code> 是盲赌，
+          这里引擎先算好再展示。</p>
+        <hr class="sep">
+        <div id="ambigBox"></div>
+      </div>
+
+      <div class="panel">
+        <h3>零声母不是特例，是同一套流程</h3>
+        <p>小鹤的零声母规则：单韵母重复（啊=AA、哦=OO、饿=EE），两字母韵母保留全拼（爱=AI、安=AN、恩=EN、欧=OU），
+          三字母韵母取首字母+韵母键（昂=AH、鞥=EG）。<code>a</code>/<code>e</code>/<code>o</code> 三个键在声母位空着，正好当零声母入口。</p>
+        <p style="margin-top:8px"><code>y</code>/<code>w</code> 作第一键时是「整体认读」占位：月=<code>yt</code>、云=<code>yy</code>、我=<code>wo</code>。</p>
+      </div>
+
+      <div class="panel">
+        <h3>方案键位表 <span class="tag" id="schemeTag">小鹤双拼</span></h3>
+        <div class="legend" id="legend"></div>
+        <hr class="sep">
+        <p style="font-size:12.5px"><strong>校验用例</strong>（公开对照表口径，页面可自检）：</p>
+        <div class="checkrow" id="checkrow"></div>
+        <p class="footnote">数据口径来自公开双拼键位对照表；正式产品请以 Rime 官方 <code>double_pinyin_*.yaml</code> 为准并内置这套校验用例。</p>
+      </div>
+
+      <div class="panel">
+        <h3>还没做的（留给你判断）</h3>
+        <ul>
+          <li><b>词组分词与 n-gram 整句联想</b>——原型只做到「两音节词表命中」，真实输入法需要语言模型。</li>
+          <li><b>个人词频学习</b>——Room 存 (编码,词) 计数 + 时间衰减，让「学习」真的生效。</li>
+          <li><b>模糊音</b>（zh/z、sh/s、n/l、f/h）——注意模糊音会<strong>扩大</strong>第二阶段的候选数，需要单独设计。</li>
+          <li><b>微软双拼</b>——它的 <code>ing</code> 占用分号键，这版键盘是纯 26 字母，接入需要改布局。</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   1. 方案数据
+   ============================================================ */
+const SCHEMES = {
+  xiaohe:{
+    name:'小鹤双拼',
+    initial:{zh:'v', ch:'i', sh:'u'},
+    final:{a:'a',o:'o',e:'e',i:'i',u:'u',v:'v',
+           ai:'d',ei:'w',ui:'v',ao:'c',ou:'z',iu:'q',ie:'p',ve:'t',er:'r',
+           an:'j',en:'f',in:'b',un:'y',vn:'y',van:'r',
+           ang:'h',eng:'g',ing:'k',ong:'s',
+           ia:'x',ua:'x',uo:'o',uai:'k',uan:'r',uang:'l',iong:'s',
+           iao:'n',ian:'m',iang:'l'}
+  },
+  ziranma:{
+    name:'自然码双拼',
+    initial:{zh:'v', ch:'x', sh:'u'},
+    final:{a:'a',o:'o',e:'e',i:'i',u:'u',v:'v',
+           ai:'l',ei:'w',ui:'v',ao:'k',ou:'b',iu:'q',ie:'p',ve:'t',er:'r',
+           an:'j',en:'f',in:'n',un:'y',vn:'y',van:'r',
+           ang:'h',eng:'g',ing:'y',ong:'s',
+           ia:'x',ua:'x',uo:'o',uai:'k',uan:'r',uang:'d',iong:'s',
+           iao:'c',ian:'m',iang:'d'}
+  }
+};
+const IDENTITY_INITS = ['b','p','m','f','d','t','n','l','g','k','h','j','q','x','r','z','c','s','y','w'];
+const ZERO_KEYS = ['a','e','o'];          // 零声母占位键
+const LETTERS = 'abcdefghijklmnopqrstuvwxyz'.split('');
+
+/* ============================================================
+   2. 音节表 + 解析
+   ============================================================ */
+const SYL_TEXT = `
+b: ba bo bai bei bao ban ben bang beng bi bie biao bian bin bing bu
+p: pa po pai pei pao pou pan pen pang peng pi pie piao pian pin ping pu
+m: ma mo me mai mei mao mou man men mang meng mi mie miao miu mian min ming mu
+f: fa fo fei fou fan fen fang feng fu fiao
+d: da de dai dei dao dou dan den dang deng di dia die diao dian ding dong du duo dui dun diu duan
+t: ta te tai tao tou tan tang teng ti tie tiao tian ting tong tu tuo tui tun tei tuan
+n: na ne nai nei nao nou nan nen nang neng ni nie niao niu nian nin niang ning nong nu nuo nuan nv nve
+l: la le lai lei lao lou lan lang leng li lia lie liao liu lian lin liang ling long lu luo luan lv lun lve
+g: ga ge gai gei gan gen gang geng gou gu gua guai guan guang gong gun gao gui guo
+k: ka ke kei kai kan ken kang keng kou ku kua kuai kuan kuang kong kun kao kui kuo
+h: ha he hei hai han hen hang heng hou hu hua huai huan huang hao hong hui hun huo
+j: ji jia jie jiao jiu jian jin jiang jing jiong ju jue juan jun
+q: qi qia qie qiao qiu qian qin qiang qing qiong qu que quan qun
+x: xi xia xie xiao xiu xian xin xiang xing xiong xu xue xuan xun
+r: re ri rao rou ran ren rang reng ru rua ruan rui rong run ruo
+z: zi za ze zei zao zou zan zen zang zeng zu zuo zui zai zun zong zuan
+c: ci ca ce cai cao cou can cen cang ceng cu cuo cui cong cun cei chong cuan
+s: si sa se sai sao sou san sen sang seng su suo sui song suan sun
+zh: zha zhe zhi zhai zhei zhao zhou zhan zhen zhang zheng zhu zhua zhuo zhuai zhuan zhui zhun zhuang zhong
+ch: cha che chi chai chao chou chan chen chang cheng chu chua chuo chuai chuan chui chun chuang
+sh: sha she shi shai shei shao shou shan shen shang sheng shu shua shuo shuai shuan shui shun shuang
+y: ya ye yi yao you yan yin yang ying yong yo yu yue yuan yun
+w: wa wo wu wai wei wan wen wang weng
+z0: a ai an ang ao e ei en eng er o ou
+`;
+const INITS = ['zh','ch','sh','b','p','m','f','d','t','n','l','g','k','h','j','q','x','r','z','c','s','y','w'];
+/* y/w 是「整体认读」占位，韵母要特殊解析：ya→ia, ye→üe, yan→ian, yang→iang … */
+/* 整体认读音节的韵母归属。
+ *
+ * 小鹤的规则：y/w 后面的韵母按「完整韵母」取键位。
+ *   羊 = y + ang → yh ；王 = w + uang → wl ；万 = w + uan → wr ；我 = w + uo → wo
+ *
+ * 这里只列**自然分解得不到**的那些：
+ *   - u 要写成 ü(v)：于 yu=yv、月 yue=yt、元 yuan=yr、云 yun=yy
+ *   - w 后面是完整的零声母韵母：娃 wa=wx、外 wai=wk
+ * 其余（要 ya=ya、要 yao=yc、也 ye=ye、有 you=yz、眼 yan=yj、用 yong=ys…）
+ * 自然分解就是对的，不用覆盖。
+ */
+const YW_FIN = {
+  yu:'v', yue:'ve', yuan:'van', yun:'vn',
+  wa:'ua', wo:'uo', wai:'uai', wan:'uan', wang:'uang'
+};
+
+function parseSyl(s){
+  let ini=null, rest=s;
+  for(const i of INITS){ if(s.startsWith(i)){ ini=i; rest=s.slice(i.length); break; } }
+  if(ini===null) return {ini:null, fin:rest};
+  if(ini==='y'||ini==='w') return {ini, fin:YW_FIN[s] || rest};
+  if(['j','q','x'].includes(ini)){
+    if(rest==='u') rest='v';
+    else if(rest==='ue') rest='ve';
+    else if(rest==='uan') rest='van';
+    else if(rest==='un') rest='vn';
+  }
+  return {ini, fin:rest};
+}
+const DISPLAY_FIN = {v:'ü', ve:'üe', van:'üan', vn:'ün'};
+/* 键面标签的显示优先级：常用韵母在前 */
+const FIN_PRIORITY = ['a','o','e','i','u','v','ai','ei','ui','ao','ou','iu','ie','ve','er','an','en','in','un','vn',
+                      'ang','eng','ing','ong','ia','ua','uo','uai','uan','van','iang','uang','iong','iao','ian'];
+const showFin = f => DISPLAY_FIN[f] || f;
+
+const SYL_BY_IF = {};         // "ini|fin" -> syl
+const FINALS_BY_INIT = {};    // ini -> [fin]
+const ZERO_SYLS = {};
+SYL_TEXT.trim().split('\n').forEach(line=>{
+  const [tag, list] = line.split(':');
+  list.trim().split(/\s+/).forEach(s=>{
+    const {ini,fin} = parseSyl(s);
+    if(ini===null){ ZERO_SYLS[fin]=s; return; }
+    const k = ini+'|'+fin;
+    if(!(k in SYL_BY_IF)) SYL_BY_IF[k]=s;              // 同音节保留首个写法
+    (FINALS_BY_INIT[ini]=FINALS_BY_INIT[ini]||[]);
+    if(!FINALS_BY_INIT[ini].includes(fin)) FINALS_BY_INIT[ini].push(fin);
+  });
+});
+
+/* 零声母占位 → 第二键 → {fin, syl}（小鹤/自然码规则一致） */
+const ZERO_STAGE = {
+  a:{a:{fin:'a',syl:'a'}, i:{fin:'ai',syl:'ai'}, n:{fin:'an',syl:'an'}, h:{fin:'ang',syl:'ang'}, o:{fin:'ao',syl:'ao'}},
+  e:{e:{fin:'e',syl:'e'}, i:{fin:'ei',syl:'ei'}, n:{fin:'en',syl:'en'}, g:{fin:'eng',syl:'eng'}, r:{fin:'er',syl:'er'}},
+  o:{o:{fin:'o',syl:'o'}, u:{fin:'ou',syl:'ou'}}
+};
+
+/* ============================================================
+   3. 常用字 / 词频数据
+   ============================================================ */
+const CHARS = {
+  ba:"八把爸吧巴霸拔跋坝靶罢",bo:"波博伯薄泊破播",bai:"白百败拜摆柏",bei:"被北杯备背倍悲贝辈碑卑",
+  bao:"保报包抱暴宝薄豹刨袍",ban:"半办班般板版伴搬颁",ben:"本奔苯笨",bang:"帮邦棒傍磅",
+  bi:"比必笔币毕闭壁避碧彼臂鼻",bie:"别憋",biao:"表标飘",bian:"变便边编鞭遍辨",bin:"宾滨彬",
+  bing:"冰并病丙兵",bu:"不布步部补捕卜",
+  pa:"怕爬趴帕",po:"坡破婆泼颇",pai:"排派拍",pei:"配陪培赔",pao:"跑炮泡抛",pou:"剖",
+  pan:"判盘盼潘",pen:"喷盆",pang:"胖庞",peng:"朋碰捧彭棚",pi:"皮疲披匹脾",piao:"票飘漂",
+  pian:"片偏篇骗",pin:"品贫拼频",ping:"平评瓶苹凭屏",pu:"普铺扑朴葡浦",
+  ma:"妈马麻码骂嘛蚂",mo:"摸末莫默磨墨陌",me:"么",mai:"买卖迈埋麦",mei:"没美每妹梅煤霉媒眉",
+  mao:"毛猫帽茅冒贸锚矛",mou:"某",man:"满慢漫蛮曼",men:"们门闷",mang:"忙盲茫芒",
+  meng:"梦猛蒙孟盟",mi:"米密迷秘蜜谜弥",miao:"秒妙苗庙描渺",mian:"面免棉眠绵勉",
+  min:"民敏闽",ming:"名明命鸣铭",mu:"木目母幕慕暮牧穆",
+  fa:"发法罚乏",fei:"飞非费肥废肺妃",fan:"反饭范翻烦犯帆繁凡",fang:"方房防放访妨芳",
+  feng:"风封丰峰锋逢奉疯讽",fu:"付父负富夫服复附福府扶浮妇符幅",
+  da:"大打达答搭",de:"的地得德",dai:"带代待戴袋呆贷",dao:"到道倒盗刀岛导",dou:"都斗豆抖陡",
+  dan:"但单担蛋胆弹",dang:"当党挡荡",deng:"等灯登邓凳",di:"地第低敌底抵帝滴笛递堤",
+  die:"爹跌蝶叠",diao:"调掉雕吊钓",dian:"点电店垫殿典",ding:"定顶订盯钉",
+  dong:"东动冬洞董懂冻",du:"度都读独渡杜督毒赌",dui:"对队堆",
+  ta:"他她它踏塔",te:"特",tai:"太台抬态泰胎",tao:"套桃讨逃陶涛",tou:"投头偷透",tan:"谈探叹碳滩坛",
+  tang:"堂糖唐汤躺塘",teng:"疼腾藤",ti:"体题提替梯踢剃",tiao:"条跳调挑",tian:"天田添填甜",
+  ting:"听停庭挺厅",tong:"通同痛统铜桶童",tu:"土图突途兔涂吐屠",tuo:"脱托拖妥拓",tui:"推退腿",
+  na:"那拿哪娜呐",ne:"呢",nai:"奶耐乃",nao:"脑闹挠恼",nan:"南难男",neng:"能",ni:"你尼泥逆倪拟",
+  niao:"鸟尿",nian:"年念",nin:"您",niang:"娘酿",ning:"宁凝拧",nong:"弄农浓",nu:"努怒奴",nv:"女",
+  nuan:"暖",
+  la:"拉啦辣蜡",le:"了乐",lai:"来赖",lei:"类累泪雷",lao:"老劳牢捞佬",lou:"楼漏露搂",
+  lan:"兰拦栏懒烂蓝篮",lang:"郎狼浪廊朗",leng:"冷愣",li:"里李理力立利历丽礼例厉励梨黎吏",
+  lia:"俩",lie:"列烈裂猎",liao:"了料聊辽疗僚",liu:"六流留刘柳溜",lian:"连脸练莲联恋链怜",
+  lin:"林临邻淋琳",liang:"两量亮梁谅辆凉粮良",ling:"令灵零领另玲铃岭",long:"龙笼隆垄拢",
+  lu:"路露录陆炉鹿卢鲁绿芦",luo:"罗落洛骆萝",luan:"乱卵",lv:"绿旅铝驴",
+  ga:"该改盖概",ge:"个各歌哥格革割隔阁",gai:"该改盖概钙",gei:"给",gan:"干感敢赶杆肝",
+  geng:"更耕",gou:"够狗构购沟钩",gu:"古故顾鼓孤估固骨菇",gua:"挂瓜刮寡",guai:"怪拐乖",
+  guan:"关管观惯冠馆灌",guang:"光广逛",ka:"卡咖",ke:"可科克刻客课颗渴壳咳",ken:"肯恳",
+  kang:"康抗炕",keng:"坑",kou:"口扣寇",ku:"苦库哭裤枯",kua:"夸跨挎",kuai:"快块筷",
+  kuan:"宽款",kuang:"况矿框狂",
+  ha:"哈",he:"和何合河喝黑荷核盒贺鹤禾",hai:"还海害孩",han:"汉含寒喊汗函韩",hang:"行杭航",
+  heng:"横恒",hou:"后厚候侯猴喉",hu:"护胡户湖互忽壶呼虎糊葫",hua:"话花化划画华哗滑",
+  huai:"怀坏淮槐",huan:"换还欢环缓幻患",huang:"黄皇晃慌荒煌",
+  ji:"机记几既急级己即济集积极计际继技寄纪季姬迹祭剂籍",jia:"家加价甲假架佳驾嫁夹",
+  jie:"接结节街姐解介届借阶截",jiao:"叫交教郊胶角脚较觉轿焦骄浇",jiu:"就九旧久酒究救舅纠",
+  jian:"见间件建健剑剪简检尖兼捡监歼荐",jin:"进近金今紧尽禁津筋谨",jiang:"将江讲降姜酱浆疆匠",
+  jing:"经京精静净镜景警竟境鲸",jiong:"窘",ju:"句局举据聚巨剧具菊拒距俱",jue:"决绝觉爵掘倔",
+  juan:"卷捐倦绢眷",
+  qi:"起其气七期奇齐骑妻旗器企漆岂启弃",qia:"恰",qie:"切且窃怯",qiao:"敲巧桥瞧乔",
+  qiu:"求球丘囚",qian:"前千钱浅签牵迁欠潜谦",qin:"亲琴勤秦侵禽",qiang:"强枪墙抢腔",
+  qing:"请清情青轻晴庆倾",qiong:"穷琼",qu:"去区取曲趣驱屈渠",que:"却确缺雀鹊",quan:"全权劝圈泉犬",
+  xi:"西息希系细喜习洗吸稀溪席袭",xia:"下夏吓虾峡霞瞎侠",xie:"些写歇鞋协血斜谢泄",
+  xiao:"小笑晓消孝效校萧啸",xiu:"休修秀袖锈",xian:"先现线县显闲限险鲜弦献宪",
+  xin:"心新信欣辛薪",xiang:"想向相香乡象箱详祥项巷",xing:"行性兴姓型星醒刑",xiong:"兄雄胸凶熊",
+  xu:"许需序徐虚续蓄须",xue:"学血雪穴削",xuan:"先选宣悬旋轩",
+  re:"热惹",ri:"日",rao:"绕饶",rou:"肉柔揉",ran:"然燃染",ren:"人认任仁忍刃",rang:"让嚷",
+  reng:"仍扔",ru:"如入乳儒辱",rua:"弱",rui:"锐瑞睿",
+  zi:"字自子资仔紫姿滋咨",za:"杂砸",ze:"则责泽择",zei:"贼",zao:"造早澡枣遭",zou:"走奏揍",
+  zan:"咱暂赞",zang:"脏藏葬",zeng:"增赠",zu:"组足族租祖",zuo:"作做坐座左昨佐",
+  ci:"次此刺瓷慈磁辞",ca:"擦",ce:"册策侧测",cai:"才材财采菜裁彩",cao:"草操曹槽",cou:"凑",
+  can:"参残餐灿",cen:"岑",cang:"仓藏舱",ceng:"层曾",cu:"促粗醋簇",cuo:"错措挫",cui:"催脆翠崔",
+  si:"四死思司丝私似撕斯饲",sa:"洒撒萨",se:"色涩瑟",sai:"赛塞",sao:"扫嫂骚",sou:"搜艘",
+  san:"三散伞",sen:"森",sang:"桑丧嗓",seng:"僧",su:"苏诉速素俗宿塑肃",suo:"所锁索缩梭",sui:"岁虽随碎穗",
+  zha:"渣炸眨",zhe:"者这着折哲浙遮",zhi:"之只知直指制治值纸支枝执职址致智置止脂",
+  zhai:"摘窄债",zhei:"这",zhao:"找照招朝赵罩兆",zhou:"周州舟粥肘皱",zhan:"站战占展粘沾",zhong:"中种重众钟终",
+  zhen:"真镇针阵珍震振",zhang:"张章长掌涨帐丈障",zheng:"正政争整证征蒸郑",
+  zhu:"主住注助朱猪竹煮逐柱驻铸",zhua:"抓",zhuo:"着桌捉卓",zhuai:"拽",zhuan:"专转赚传砖",
+  zhui:"追坠",zhun:"准",zhuang:"装状庄撞桩",
+  cha:"查茶察差叉",che:"车彻撤扯",chi:"吃迟池持尺赤翅斥",chai:"拆柴",chao:"超朝抄吵炒",
+  chou:"抽愁筹丑仇绸",chan:"产禅缠颤铲",chen:"沉陈晨臣尘衬",chang:"长常场厂唱偿昌畅尝肠",
+  cheng:"成程城诚称呈承乘惩澄",chu:"出初处除楚础厨储橱触",chuo:"绰戳",chuai:"揣",
+  chuan:"穿传船川串喘",chui:"吹垂锤捶",chun:"春纯唇蠢淳",chuang:"窗床创闯",
+  sha:"沙杀纱傻",she:"社设射蛇摄舍涉",shi:"是时事十使市式史实识石师试示食始士视世什室适饰逝誓释",
+  shai:"筛晒",shao:"少烧绍勺哨稍",shou:"手收受首瘦授兽",shan:"山善闪删衫扇珊",
+  shen:"身深神审申沈伸",shang:"上商伤赏尚裳",sheng:"生声省胜剩升绳圣盛牲",
+  shu:"书数术树输属熟述殊舒叔鼠淑疏",shua:"刷耍",shuo:"说硕",shuai:"帅摔甩率",shuan:"拴",
+  shui:"水谁税睡",shun:"顺瞬舜",shuang:"双爽霜",
+  beng:"崩绷甭",
+  pie:"撇瞥",
+  mie:"灭蔑咩",
+  miu:"谬",
+  fo:"佛",
+  fou:"否",
+  fen:"分粉份芬纷奋坟愤",
+  dei:"得",
+  den:"扽",
+  dia:"嗲",
+  duo:"多躲朵夺踱",
+  tie:"贴铁帖",
+  nei:"内哪",
+  nou:"耨",
+  nen:"嫩",
+  nang:"囊",
+  nie:"捏聂孽",
+  niu:"牛扭纽",
+  nuo:"挪诺",
+  gen:"根跟",
+  gang:"刚钢港岗纲",
+  kai:"开凯慨",
+  kan:"看刊砍",
+  hei:"黑嘿",
+  hen:"很恨痕",
+  ruan:"软阮",
+  zen:"怎",
+  zui:"最嘴醉",
+  chua:"欻",
+  shei:"谁",
+  yo:"哟",
+  hao:"好号浩豪毫耗",
+  jun:"军均君菌",
+  qun:"群裙",
+  xun:"训讯迅",
+  zai:"在再灾载栽",
+  zhun:"准",
+  chou:"抽愁筹丑仇绸",
+  song:"送松颂",
+  suan:"酸算蒜",
+  cong:"从丛聪",
+  cun:"村存寸",
+  dun:"顿盾敦",
+  tun:"吞屯",
+  lun:"论轮伦",
+  gong:"工公共功供攻",
+  kong:"空控恐",
+  kun:"困昆坤",
+  hong:"红洪宏",
+  hui:"回会灰挥辉毁",
+  hun:"婚混魂昏",
+  zun:"尊遵",
+  rong:"容荣绒融",
+  gun:"滚棍辊",
+  a:"啊阿呵",ai:"爱矮唉哎",an:"安按暗岸案俺鞍",ang:"昂",ao:"奥熬凹袄傲懊",
+  e:"饿恶额鹅俄蛾",ei:"诶",en:"恩",er:"儿而二耳尔饵",o:"哦噢",ou:"欧偶藕鸥",
+  yi:"一以已意衣医依易椅亿艺议益翼移疑仪宜姨遗",ya:"呀压牙亚崖鸦雅",ye:"也业夜叶野爷页月",
+  yao:"要药摇腰咬耀遥谣",you:"有又右由油友优幽忧犹邮游",yan:"言严眼研盐烟演延颜沿宴艳",
+  yin:"因引音印银阴饮隐姻",yang:"样阳养羊杨洋仰痒",ying:"应英影迎营硬赢映鹰婴盈",
+  yong:"用永勇拥涌庸泳",yu:"于与语鱼雨预玉育遇域欲愈渔娱羽愚",yue:"月约越阅跃岳悦",
+  yuan:"元远院愿员园原源怨",yun:"云运允晕孕韵",
+  wu:"五无物务屋误雾武舞午勿乌污悟",wa:"娃挖袜",wo:"我握卧窝沃",wai:"外歪",
+  wei:"为位未维委伟危围味卫谓喂伪",wan:"万完晚玩碗弯湾宛挽",wen:"文闻问温稳纹吻",
+  wang:"王往网忘望亡旺汪",weng:"翁",
+  biang:"𰻝",cei:"恻",chong:"冲充重虫崇",cuan:"窜蹿篡",diu:"丢铥",duan:"断段短端锻缎",
+  fiao:"覅",gao:"高告搞糕稿膏羔",gui:"鬼贵规归跪柜诡瑰桂龟轨闺",guo:"过国果郭锅裹蝈",
+  huo:"或活火伙获惑货祸霍豁",kao:"靠考烤铐拷犒",kui:"亏愧溃盔魁窥奎葵馈",
+  kuo:"括扩阔廓",lve:"略掠锊",nve:"虐疟",run:"润闰",ruo:"若弱偌箬",
+  sun:"孙损笋隼",tei:"忒",tuan:"团湍抟彖",zong:"总宗纵踪综棕鬃粽",zuan:"钻攥纂缵"
+};
+
+const PHRASES = {
+  nihao:'你好',women:'我们',nimen:'你们',tamen:'他们',shenme:'什么',zenme:'怎么',
+  zheyang:'这样',nayang:'那样',yinwei:'因为',suoyi:'所以',danshi:'但是',ruguo:'如果',
+  keyi:'可以',meiyou:'没有',haishi:'还是',xianzai:'现在',mingtian:'明天',jintian:'今天',
+  zuotian:'昨天',zaoshang:'早上',wanshang:'晚上',shijian:'时间',shiqing:'事情',
+  wenti:'问题',gongzuo:'工作',xuexi:'学习',gongsi:'公司',zhongguo:'中国',beijing:'北京',
+  shanghai:'上海',shouji:'手机',diannao:'电脑',jianpan:'键盘',shuru:'输入',hanyu:'汉语',
+  pinyin:'拼音',shuangpin:'双拼',xiexie:'谢谢',zaijian:'再见',duibuqi:'对不起',
+  meiguanxi:'没关系',qingwen:'请问',zhidao:'知道',mingbai:'明白',xihuan:'喜欢',
+  aini:'爱你',xiangni:'想你',jiayou:'加油',wanan:'晚安',shengrikuaile:'生日快乐',
+  haozibinyisi:'不好意思',haode:'好的',shide:'是的',dui:'对',bu:'不',xing:'行',
+  xuyao:'需要','yinggai':'应该',bixu:'必须',yijing:'已经',zhengzai:'正在',
+  mashang:'马上',yiqi:'一起',yiding:'一定',keneng:'可能',weishenme:'为什么',
+  zenmeyang:'怎么样',yidian:'一点',yixie:'一些',henduo:'很多',tebie:'特别',
+  feichang:'非常',zhende:'真的',dangran:'当然',biliru:'比如',ziji:'自己',dajia:'大家',
+  pengyou:'朋友',laoshi:'老师',tongxue:'同学',haizi:'孩子',fumu:'父母',jiating:'家庭',
+  shenghuo:'生活',shijie:'世界',guojia:'国家',shehui:'社会',chengshi:'城市',
+  nongcun:'农村',yiyuan:'医院',yinhang:'银行',shangdian:'商店',chaoshi:'超市',
+  canting:'餐厅',tianqi:'天气',xiayu:'下雨','guafeng':'刮风',taiyang:'太阳',
+  yueliang:'月亮','xingxing':'星星',dianshi:'电视',yinyue:'音乐',dianying:'电影',
+  youxi:'游戏',wangluo:'网络',ruanjian:'软件',shuju:'数据',xitong:'系统',
+  wenjian:'文件',chengxu:'程序',kaifa:'开发','sheji':'设计',chanpin:'产品',
+  shichang:'市场',xiaoshou:'销售',jingli:'经理',laoban:'老板',yuangong:'员工',
+  huiyi:'会议',baogao:'报告',jihua:'计划',xiangmu:'项目',renwu:'任务',
+  wancheng:'完成',kaishi:'开始',jieshu:'结束',jixu:'继续',jianyi:'建议',
+  jiejue:'解决',fangfa:'方法',xiaoguo:'效果',zhongyao:'重要',zhuyao:'主要',
+  jiben:'基本','yiban':'一般',qishi:'其实',suiran:'虽然','buguo':'不过',
+  erqie:'而且',huozhe:'或者','yiji':'以及',guanyu:'关于',duiyu:'对于',
+  tongguo:'通过',genju:'根据','anzhao':'按照',chule:'除了',liru:'例如',
+  yiyang:'一样',yizhi:'一直',haoxiang:'好像',dagai:'大概',wanquan:'完全',
+  shaowei:'稍微',youdian:'有点',xuduo:'许多','yige':'一个','san':'三'
+};
+
+const COMMON = ('的一是了我不人在他有这个上们来到时大地为子中你说生国年着就那和要她出也得里后自以会家可下而过天去能对小多然于心学么之都好看起发当没成只如事把还用第样道想作种开美总从无情己面最女但现前些所同日手又行意动方期它头经长儿回位分爱老因很给名法间斯知世什两次使身者被高已亲其进此话常与活正感见明问力理尔点文几定本公特做外孩相西果走将月十实向声车全信重三机工物气每并别真打太新比才便夫再书部水像眼等体却加电主界门利海受听表德少克代员许先口由死安写性马光白或住难望教命花结乐色更拉东神记处让母父应直字场平报友关放至张认接告入笑内英军候民岁往何度山觉路带万男边风解叫任金快原吃妈变通师立象数四失满战远格士音轻目条呢病始达深完今提求清王化空业思切怎非找片罗钱吗语元喜曾离飞科言干流欢约各即指合反题必该论交终林请医晚制球决传画保读运及则房早衣量否水' +
+  '牛羊马虎鸟虫鱼兔龙凤熊猫手机电脑电视空调冰箱灯筷杯盘锅碗勺桌椅床沙发屋门窗楼梯电梯').split('').filter((c,i,a)=>a.indexOf(c)===i && c.trim()!=='');
+
+/* ============================================================
+   4. 引擎
+   ============================================================ */
+let SCHEME = SCHEMES.xiaohe;
+let state = {
+  stage:'initial',        // initial | final | char
+  firstKey:null,          // 第一键
+  firstInitial:null,      // 第一键对应的声母（零声母时为 null）
+  finals:null,            // Map key -> {fin, syl}
+  syl:null,               // 已确定的音节
+  committed:'',           // 已上屏文本
+  pending:[]              // 本轮已输入的音节序列（用于词组匹配）
+};
+
+function initialByKey(scheme){
+  const m={};
+  IDENTITY_INITS.forEach(i=>m[i]=i);
+  Object.entries(scheme.initial).forEach(([ini,k])=>m[k]=ini);
+  return m;
+}
+function finalsOnKey(scheme, key){
+  return Object.keys(scheme.final).filter(f=>scheme.final[f]===key)
+              .sort((a,b)=>FIN_PRIORITY.indexOf(a)-FIN_PRIORITY.indexOf(b));
+}
+function genericFinalLabel(scheme, key){
+  return finalsOnKey(scheme,key).slice(0,2).map(showFin).join('/');
+}
+function genericFinalLabelFull(scheme, key){
+  return finalsOnKey(scheme,key).map(showFin).join('/');
+}
+/* 给定第一键，算出所有合法的第二键 → 韵母（歧义在此消解） */
+function resolveFinals(scheme, firstKey){
+  const out = new Map();
+  if(ZERO_KEYS.includes(firstKey)){
+    Object.entries(ZERO_STAGE[firstKey]).forEach(([k,v])=>out.set(k,v));
+    return out;
+  }
+  const ini = initialByKey(scheme)[firstKey];
+  if(!ini) return out;
+  const fins = FINALS_BY_INIT[ini] || [];
+  const groups = {};
+  fins.forEach(fin=>{
+    const k = scheme.final[fin];
+    if(!k) return;
+    (groups[k]=groups[k]||[]).push(fin);
+  });
+  Object.entries(groups).forEach(([k,list])=>{
+    out.set(k, {fin:list.join('/'), syl: SYL_BY_IF[ini+'|'+list[0]]});
+  });
+  return out;
+}
+function sylByKeys(firstKey, secondKey){
+  const finals = resolveFinals(SCHEME, firstKey);
+  const hit = finals.get(secondKey);
+  return hit ? hit : null;
+}
+function firstKeyLabel(key){
+  if(ZERO_KEYS.includes(key)) return '零';
+  const ini = initialByKey(SCHEME)[key];
+  if(!ini) return key;
+  if(ini==='zh') return 'zh';
+  if(ini==='ch') return 'ch';
+  if(ini==='sh') return 'sh';
+  return ini;
+}
+function firstKeyHint(key){
+  if(ZERO_KEYS.includes(key)) return key;
+  const ini = initialByKey(SCHEME)[key];
+  if(ini==='y'||ini==='w') return '整体';
+  return '';
+}
+
+/* ============================================================
+   5. 渲染
+   ============================================================ */
+const ROWS = [
+  ['q','w','e','r','t','y','u','i','o','p'],
+  ['a','s','d','f','g','h','j','k','l'],
+  ['z','x','c','v','b','n','m']
+];
+const $ = s=>document.querySelector(s);
+let showHintMap = true, showPreview = true, plainMode = false;
+
+function render(){
+  renderEditor(); renderHint(); renderCand(); renderKeys();
+}
+function renderEditor(){
+  const comp = state.pending.length ? runChars() : '';
+  const txt = state.committed ? state.committed : '';
+  $('#editor').innerHTML =
+    (txt ? '<span>'+escapeHtml(txt)+'</span>' : '<span class="ph">在这里输入…</span>') +
+    (comp ? '<span class="comp">'+escapeHtml(comp)+'</span>' : '') +
+    '<span class="cursor"></span>';
+}
+function escapeHtml(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function renderHint(){
+  const bar = $('#hintbar');
+  let st='', code='', rest='';
+  if(state.stage==='initial'){
+    st='<span class="st s0">声母位</span>';
+    code='等待第一个键（26 个键全部合法）';
+    rest='零声母入口：a / e / o';
+  }else if(state.stage==='final'){
+    st='<span class="st s2">韵母位</span>';
+    code='<span class="code">'+state.firstKey+'</span> + ?';
+    rest='可按 '+state.finals.size+' 个键 · 点候选也行';
+  }else{
+    st='<span class="st">音节</span>';
+    code='<span class="code">'+runPinyin()+'</span> → <span class="code">'+runChars()+'</span>';
+    rest='空格上屏 · ← 换韵母';
+  }
+  bar.innerHTML = st+'<span>'+code+'</span><span class="rest">'+rest+'</span>';
+}
+
+function renderCand(){
+  const bar = $('#candbar');
+  bar.innerHTML='';
+  const chip = (html, cls, fn)=>{
+    const d=document.createElement('div');
+    d.className='chip '+(cls||'');
+    d.innerHTML=html;
+    if(fn) d.onclick=fn;
+    bar.appendChild(d); return d;
+  };
+  if(state.stage==='initial'){
+    chip('<span class="hint">常用字 · 点一下直接上屏</span>');
+    COMMON.slice(0,40).forEach(c=>{
+      chip('<span class="big">'+c+'</span>', '', ()=>{ state.committed+=c; state.pending=[]; render(); });
+    });
+  }else if(state.stage==='final'){
+    chip('<span class="hint">韵母键</span>');
+    ROWS.flat().forEach(k=>{
+      const hit = state.finals.get(k);
+      if(!hit) return;
+      const syl = hit.syl;
+      const ex = syl ? (CHARS[syl]||'').charAt(0) : '';
+      let html = '<span class="ck">'+k+'</span><span class="cf">'+showFin(hit.fin)+'</span>';
+      if(showPreview && ex) html += '<span class="cs">'+ex+'</span>';
+      chip(html, '', ()=>chooseFinal(k));
+    });
+  }else{
+    // 音节已定 → 候选
+    const tail = runPinyin();
+    const ph = PHRASES[tail];
+    if(ph) chip('<span class="big">'+ph+'</span><span class="py">'+tail+'</span>','phrase', ()=>commitText(ph));
+    const last = state.pending[state.pending.length-1];
+    const list = CHARS[last.syl] || '';
+    chip('<span class="hint">'+tail+'</span>');
+    for(let i=0;i<list.length;i++){
+      chip('<span class="big">'+list[i]+'</span>','', ()=>commitChar(list[i]));
+    }
+  }
+}
+
+function renderKeys(){
+  const wrap = $('#keys'); wrap.innerHTML='';
+  const mkRow = ()=>{ const d=document.createElement('div'); d.className='krow'; wrap.appendChild(d); return d; };
+
+  ROWS.forEach(row=>{
+    const r = mkRow();
+    row.forEach(k=>{
+      const btn = document.createElement('div');
+      btn.className='key'; btn.dataset.k=k;
+      let big='', small='', cls='', ghost=false;
+      const isFinalStage = (state.stage==='final');
+      if(plainMode){
+        big = k.toUpperCase();
+        if(isFinalStage){
+          cls = state.finals.has(k) ? 'lit' : 'dead';
+        }
+      }else{
+        if(!isFinalStage){
+          big = firstKeyLabel(k);
+          if(showHintMap){
+            const ini = initialByKey(SCHEME)[k];
+            if(ZERO_KEYS.includes(k)) small = k;
+            else if(ini==='y'||ini==='w') small='整体认读';
+            else small = genericFinalLabel(SCHEME,k);
+          }
+        }else{
+          const hit = state.finals.get(k);
+          if(hit){ big = showFin(hit.fin); cls='lit'; }
+          else{
+            cls='dead';
+            big = showHintMap ? genericFinalLabel(SCHEME,k) : '·';
+            ghost = showHintMap;
+          }
+          small = k;
+        }
+      }
+      btn.className='key '+cls;
+      btn.innerHTML='<span class="big'+(ghost?' ghost':'')+'">'+big+'</span>'+
+        (small?'<span class="small'+(small.length>6?' long':'')+'">'+small+'</span>':'');
+      btn.onclick = ()=>pressKey(k);
+      r.appendChild(btn);
+    });
+    if(row===ROWS[2]){
+      const b=document.createElement('div');
+      b.className='key fn'; b.innerHTML='<span class="big">⌫</span>';
+      b.onclick=backspace; r.appendChild(b);
+    }
+  });
+
+  // 底部功能行
+  const r = mkRow();
+  const mk=(label,fn,cls)=>{ const b=document.createElement('div'); b.className='key fn '+(cls||''); b.innerHTML='<span class="big">'+label+'</span>'; b.onclick=fn; r.appendChild(b); return b; };
+  mk('清空',()=>{ state.committed=''; state.pending=[]; state.stage='initial'; state.firstKey=null; render(); });
+  const sp=mk('空格 · 上屏',()=>commitTop(),'wide'); sp.style.flex='1 1 auto';
+  mk('换方案',()=>{ $('#schemeSel').value = SCHEME.name==='小鹤双拼'?'ziranma':'xiaohe'; switchScheme($('#schemeSel').value); });
+}
+
+/* ============================================================
+   6. 交互
+   ============================================================ */
+function pressKey(k){
+  if(state.stage==='initial'){
+    state.firstKey=k;
+    state.finals=resolveFinals(SCHEME,k);
+    if(state.finals.size===0){ state.stage='initial'; state.firstKey=null; return; }
+    state.stage='final'; render();
+  }else if(state.stage==='final'){
+    chooseFinal(k);
+  }else{
+    // 音节已定：按新字母 = 开下一个音节，本轮输入继续累积（不清空、不上屏）
+    state.firstKey=k;
+    state.finals=resolveFinals(SCHEME,k);
+    if(state.finals.size===0){ state.stage='char'; return; }
+    state.stage='final'; render();
+  }
+}
+function chooseFinal(k){
+  const hit = state.finals.get(k);
+  if(!hit) return;
+  state.syl = hit;
+  state.pending.push(hit);
+  state.stage='char';
+  render();
+}
+function runPinyin(){ return state.pending.map(p=>p.syl).join(''); }
+function runChars(){ return state.pending.map(p=>(CHARS[p.syl]||'').charAt(0)).join(''); }
+function commitTop(){
+  if(state.stage!=='char' || !state.pending.length) return;
+  const ph = PHRASES[runPinyin()];
+  commitText(ph || runChars());
+}
+function commitChar(ch){
+  // 前面的音节用默认首字，最后一个音节用用户选中的字
+  const base = state.pending.slice(0,-1).map(p=>(CHARS[p.syl]||'').charAt(0)).join('');
+  commitText(base + ch);
+}
+function commitText(t){
+  state.committed += t;
+  state.pending = [];
+  state.stage='initial'; state.firstKey=null; state.finals=null; state.syl=null;
+  render();
+}
+function backspace(){
+  if(state.stage==='char'){ state.stage='final'; state.pending.pop(); state.syl=state.pending[state.pending.length-1]||null; render(); return; }
+  if(state.stage==='final'){ state.stage='initial'; state.firstKey=null; state.finals=null; render(); return; }
+  state.committed = state.committed.slice(0,-1); render();
+}
+
+/* ============================================================
+   7. 方案面板 / 校验
+   ============================================================ */
+function renderLegend(){
+  const box = $('#legend'); box.innerHTML='';
+  const map = SCHEME.final;
+  const inv = {};
+  Object.entries(map).forEach(([fin,k])=>{ (inv[k]=inv[k]||[]).push(fin); });
+  ROWS.flat().forEach(k=>{
+    const fins = finalsOnKey(SCHEME,k);
+    const ini = initialByKey(SCHEME)[k];
+    const iniLabel = ZERO_KEYS.includes(k) ? '零声母' : (ini==='y'||ini==='w' ? '整体认读' : (ini||'-'));
+    const d=document.createElement('div');
+    d.innerHTML='<b>'+k+'</b><span>'+(fins.map(showFin).join('/')||'—')+'</span><span style="color:#aeb5c1">· '+iniLabel+'</span>';
+    box.appendChild(d);
+  });
+  $('#schemeTag').textContent = SCHEME.name;
+}
+/* 校验用例：[汉字, 拼音, 期望编码] */
+const CHECK_CASES = {
+  xiaohe:[['拼','pin','pb'],['平','ping','pk'],['亮','liang','ll'],['料','liao','ln'],['来','lai','ld'],
+          ['老','lao','lc'],['楼','lou','lz'],['文','wen','wf'],['学','xue','xt'],['中','zhong','vs']],
+  ziranma:[['拼','pin','pn'],['平','ping','py'],['亮','liang','ld'],['料','liao','lc'],['来','lai','ll'],
+          ['老','lao','lk'],['楼','lou','lb'],['文','wen','wf'],['学','xue','xt'],['中','zhong','vs']]
+};
+function renderCheck(){
+  const key = SCHEME===SCHEMES.xiaohe ? 'xiaohe' : 'ziranma';
+  const row=$('#checkrow'); row.innerHTML='';
+  CHECK_CASES[key].forEach(([zi,py,code])=>{
+    const d=document.createElement('span');
+    d.className='ckc '+(encode(py)===code?'ok':'bad');
+    d.textContent = zi+'='+code+(encode(py)===code?'':' (实际'+encode(py)+')');
+    row.appendChild(d);
+  });
+}
+function encode(syl){
+  const {ini,fin} = parseSyl(syl);
+  if(ini===null){
+    const map={a:'aa',ai:'ai',an:'an',ang:'ah',ao:'ao',e:'ee',ei:'ei',en:'en',eng:'eg',er:'er',o:'oo',ou:'ou'};
+    return map[fin]||'';
+  }
+  const ik = (Object.entries(SCHEME.initial).find(([k])=>k===ini)||[ini,ini])[1];
+  const fk = SCHEME.final[fin];
+  return ik+fk;
+}
+function renderAmbig(){
+  const box=$('#ambigBox'); box.innerHTML='';
+  const pairs = [
+    ['k','ing / uai','d/t/n/l/j/q/x/zh/ch/sh 之后只能接 ing；g/k/sh/zh/ch 之后只能接 uai'],
+    ['s','ong / iong','j/q/x 之后只能接 iong，其余接 ong'],
+    ['x','ia / ua','j/q/x 之后接 ia，其余接 ua'],
+    ['l','iang / uang','j/q/x/zh/ch/sh 接 iang；g/k/h 接 uang'],
+    ['o','o / uo','b/p/m/f 之后接 o；d/t/n/l/zh/ch/sh 接 uo'],
+    ['v','ü / ui','n/l 接 ü；g/sh/zh/ch 接 ui'],
+    ['y','un / ün','g/k/h 接 un；j/q/x/y 接 ün'],
+    ['t','üe / ue','j/q/x/y/n/l 接 üe'],
+    ['r','uan / üan','j/q/x/y 接 üan；n/l 接 uan']
+  ];
+  const tbl=document.createElement('table');
+  tbl.innerHTML='<tr><th style="width:34px">键</th><th style="width:92px">两种韵母</th><th>消解规则</th></tr>';
+  pairs.forEach(p=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td><code>'+p[0]+'</code></td><td>'+p[1]+'</td><td style="color:#5b6472">'+p[2]+'</td>';
+    tbl.appendChild(tr);
+  });
+  box.appendChild(tbl);
+}
+
+/* ============================================================
+   8. 初始化
+   ============================================================ */
+function switchScheme(key){
+  SCHEME = SCHEMES[key];
+  state.stage='initial'; state.firstKey=null; state.finals=null; state.syl=null; state.pending=[];
+  renderLegend(); renderCheck(); render();
+}
+$('#schemeSel').addEventListener('change',e=>switchScheme(e.target.value));
+$('#modeVisual').addEventListener('click',()=>{ plainMode=false; $('#modeVisual').classList.add('on'); $('#modePlain').classList.remove('on'); render(); });
+$('#modePlain').addEventListener('click',()=>{ plainMode=true; $('#modePlain').classList.add('on'); $('#modeVisual').classList.remove('on'); render(); });
+$('#tglHint').addEventListener('click',e=>{ showHintMap=!showHintMap; e.target.classList.toggle('on',showHintMap); render(); });
+$('#tglPreview').addEventListener('click',e=>{ showPreview=!showPreview; e.target.classList.toggle('on',showPreview); render(); });
+
+renderLegend(); renderCheck(); renderAmbig(); render();
+</script>
+</body>
+</html>

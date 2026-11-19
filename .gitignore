@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────
+# 密钥与凭据：绝不能进仓库
+# ─────────────────────────────────────────────────────────────
+# MiniMax key（sk-cp-…）只给 tools/lexeme_server.mjs 用，
+# 绝对不能打进 APK，也不能提交。
+MiniMax key.txt
+*.key.txt
+*.pem
+*.p12
+*.jks
+*.keystore
+.env
+.env.*
+
+# 本仓库的 Git 元数据目录（git init --separate-git-dir 建的）
+# 它在工作区内部，必须排除，否则会被当成普通目录跟踪。
+Git/
+
+# ─────────────────────────────────────────────────────────────
+# Gradle
+# ─────────────────────────────────────────────────────────────
+.gradle/
+build/
+local.properties
+
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Kotlin 编译会话
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# 运行日志与诊断输出
+*.log
+
+# 临时文件
+*.tmp
+Thumbs.db
+desktop.ini

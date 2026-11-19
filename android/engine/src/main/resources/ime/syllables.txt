@@ -1,0 +1,25 @@
+# init	音节列表（空格分隔）；init=z0 表示零声母
+b: ba bo bai bei bao ban ben bang beng bi bie biao bian bin bing bu
+p: pa po pai pei pao pou pan pen pang peng pi pie piao pian pin ping pu
+m: ma mo me mai mei mao mou man men mang meng mi mie miao miu mian min ming mu
+f: fa fo fei fou fan fen fang feng fu fiao
+d: da de dai dei dao dou dan den dang deng di dia die diao dian ding dong du duo dui dun diu duan
+t: ta te tai tao tou tan tang teng ti tie tiao tian ting tong tu tuo tui tun tei tuan
+n: na ne nai nei nao nou nan nen nang neng ni nie niao niu nian nin niang ning nong nu nuo nuan nv nve
+l: la le lai lei lao lou lan lang leng li lia lie liao liu lian lin liang ling long lu luo luan lv lun lve
+g: ga ge gai gei gan gen gang geng gou gu gua guai guan guang gong gun gao gui guo
+k: ka ke kei kai kan ken kang keng kou ku kua kuai kuan kuang kong kun kao kui kuo
+h: ha he hei hai han hen hang heng hou hu hua huai huan huang hao hong hui hun huo
+j: ji jia jie jiao jiu jian jin jiang jing jiong ju jue juan jun
+q: qi qia qie qiao qiu qian qin qiang qing qiong qu que quan qun
+x: xi xia xie xiao xiu xian xin xiang xing xiong xu xue xuan xun
+r: re ri rao rou ran ren rang reng ru rua ruan rui rong run ruo
+z: zi za ze zei zao zou zan zen zang zeng zu zuo zui zai zun zong zuan
+c: ci ca ce cai cao cou can cen cang ceng cu cuo cui cong cun cei chong cuan
+s: si sa se sai sao sou san sen sang seng su suo sui song suan sun
+zh: zha zhe zhi zhai zhei zhao zhou zhan zhen zhang zheng zhu zhua zhuo zhuai zhuan zhui zhun zhuang zhong
+ch: cha che chi chai chao chou chan chen chang cheng chu chua chuo chuai chuan chui chun chuang
+sh: sha she shi shai shei shao shou shan shen shang sheng shu shua shuo shuai shuan shui shun shuang
+y: ya ye yi yao you yan yin yang ying yong yo yu yue yuan yun
+w: wa wo wu wai wei wan wen wang weng
+z0: a ai an ang ao e ei en eng er o ou

@@ -1,0 +1,10 @@
+# 整体认读音节	实际韵母
+yu	v
+yue	ve
+yuan	van
+yun	vn
+wa	ua
+wo	uo
+wai	uai
+wan	uan
+wang	uang

@@ -1,0 +1,24 @@
+# 声母匹配顺序（先匹配者胜出，故 zh/ch/sh 必须靠前）
+zh
+ch
+sh
+b
+p
+m
+f
+d
+t
+n
+l
+g
+k
+h
+j
+q
+x
+r
+z
+c
+s
+y
+w

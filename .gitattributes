@@ -1,0 +1,20 @@
+# 二进制文件：不做换行转换，也不参与文本 diff
+*.ort binary
+*.so binary
+*.dylib binary
+*.jar binary
+*.apk binary
+*.aab binary
+*.dex binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.wav binary
+*.pcm binary
+*.zip binary
+
+# 词库与模型等大数据文件：按原样存储，不做任何换行/编码转换
+phrases.txt -text
+chars.txt -text
+lm_step.ort binary
