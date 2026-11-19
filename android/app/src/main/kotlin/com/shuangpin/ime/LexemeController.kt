@@ -23,10 +23,6 @@ class LexemeController(private val context: Context) {
      */
     private val settings: ImeSettings by lazy { ImeSettings(context) }
 
-    private var client: LexemeClient? = null
-    private var clientEndpoint: String = ""
-    private var clientProtocol: String = ""
-
     /** 开关。默认关。 */
     val enabled: Boolean get() = settings.llmEnabled
 
@@ -38,11 +34,13 @@ class LexemeController(private val context: Context) {
      *
      * 「下一词」和「纠错」是两条互不相干的线——
      * 上一轮下一词的请求还在飞，不该把这一轮的纠错请求一起作废。
+     *
+     * 用 ConcurrentHashMap：主线程写、工作线程读，普通 HashMap 并发读写会出事。
      */
-    private val tokens = HashMap<String, Int>()
+    private val tokens = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
-    /** 每个通道上一次请求的键——同样的请求不重复问。 */
-    private val keys = HashMap<String, String>()
+    /** 每个通道上一次请求的键——同样的请求不重复问。同样是跨线程访问。 */
+    private val keys = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /**
      * 请求联想建议。
@@ -60,7 +58,7 @@ class LexemeController(private val context: Context) {
         if (key == keys[channel]) return
         keys[channel] = key
 
-        val c = clientFor()
+        val c = clientFor(channel)
         val myToken = (tokens[channel] ?: 0) + 1
         tokens[channel] = myToken
         diag(
@@ -111,18 +109,35 @@ class LexemeController(private val context: Context) {
         }
     }
 
-    private fun clientFor(): LexemeClient {
+    /**
+     * 每个通道一个客户端。
+     *
+     * 之前三个通道共用一个客户端，而客户端内部是**单线程串行**的：
+     * 「下一词」那次请求慢（推理型模型偶尔要 12 秒），
+     * 「纠错」就得排在它后面等——纠错建议到的时候用户早就打完下一句了。
+     *
+     * 通道之间本来就不该互相拖累（token 本来就是每个通道一份），
+     * 这里把客户端也拆成每个通道一份。
+     */
+    private val clients = java.util.concurrent.ConcurrentHashMap<String, LexemeClient>()
+    private val clientEndpoints = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val clientProtocols = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun clientFor(channel: String): LexemeClient {
         val ep = endpoint
         val proto = settings.llmProtocol
-        if (client == null || clientEndpoint != ep || clientProtocol != proto) {
-            client = LexemeClient(
-                endpoint = ep,
-                onError = { msg -> diag("请求失败 $msg") },
-                protocol = proto,
-            )
-            clientEndpoint = ep
-            clientProtocol = proto
+        val c = clients[channel]
+        if (c != null && clientEndpoints[channel] == ep && clientProtocols[channel] == proto) {
+            return c
         }
-        return client!!
+        val nc = LexemeClient(
+            endpoint = ep,
+            onError = { msg -> diag("请求失败[$channel] $msg") },
+            protocol = proto,
+        )
+        clients[channel] = nc
+        clientEndpoints[channel] = ep
+        clientProtocols[channel] = proto
+        return nc
     }
 }

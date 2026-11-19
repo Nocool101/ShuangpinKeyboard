@@ -1,6 +1,7 @@
 package com.shuangpin.engine
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -179,6 +180,116 @@ class LexemeClientTest {
         }
         assertTrue("第一个请求要有结果", first != null)
         assertTrue("第二个请求不该被丢掉，实际=$second", second != null)
+    }
+
+    /**
+     * **连着发两个请求，第二个不许丢。**
+     *
+     * 这是真机上「纠错时灵时不灵」的根因：
+     * 提交一次上屏会**连着**发两个请求——先「下一词」，再「纠错」。
+     * 这两次调用之间只隔几微秒，而工作线程这时候**还没被创建**（线程创建要几十上百微秒）。
+     * 于是第二个请求进了「排队槽」，接着工作线程起来取活儿时
+     * 把排队槽一起清了——第二个请求就这么没了。
+     *
+     * 现象是随机的：下一词慢的时候（模型慢）更容易复现。
+     *
+     * 这里的假服务会把**第一个**响应压住 1.2 秒，
+     * 保证「第一个在飞、第二个排队」这个状态真的出现了。
+     */
+    @Test
+    fun `连着发两个请求时第二个不许丢`() {
+        val server = java.net.ServerSocket(0, 8, java.net.InetAddress.getByName("127.0.0.1"))
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val worker = Thread {
+            while (!stop.get()) {
+                try {
+                    val s = server.accept()
+                    Thread {
+                        try {
+                            val input = s.getInputStream()
+                            val head = StringBuilder()
+                            while (true) {
+                                val b = input.read()
+                                if (b < 0) break
+                                head.append(b.toChar())
+                                if (head.length >= 4 && head.substring(head.length - 4) == "\r\n\r\n") break
+                            }
+                            val len = Regex("Content-Length: (\\d+)", RegexOption.IGNORE_CASE)
+                                .find(head.toString())?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                            val buf = ByteArray(len)
+                            var read = 0
+                            while (read < len) {
+                                val n = input.read(buf, read, len - read)
+                                if (n < 0) break
+                                read += n
+                            }
+                            // 压住第一个响应 1.2 秒 —— 让第二个请求确定会进排队槽
+                            Thread.sleep(1200)
+                            val resp = """{"next":["x"]}""".toByteArray()
+                            val out = s.getOutputStream()
+                            out.write(
+                                ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                                    "Content-Length: ${resp.size}\r\nConnection: close\r\n\r\n").toByteArray()
+                            )
+                            out.write(resp)
+                            out.flush()
+                        } catch (ignored: Throwable) {
+                        }
+                    }.apply { isDaemon = true }.start()
+                } catch (ignored: Throwable) {
+                    if (stop.get()) return@Thread
+                }
+            }
+        }
+        worker.isDaemon = true
+        worker.start()
+
+        try {
+            val client = LexemeClient("http://127.0.0.1:${server.localPort}") { }
+            val done = java.util.concurrent.CountDownLatch(2)
+            val got = java.util.Collections.synchronizedList(ArrayList<Int>())
+
+            // 连着发，中间不许插任何等待 —— 这正是 App 里的调用方式
+            client.request(LexemeRequest(text = "第一")) { got.add(1); done.countDown() }
+            client.request(LexemeRequest(input = "第二")) { got.add(2); done.countDown() }
+
+            val ok = done.await(20, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue("两个请求都该有结果，实际只收到 $got", ok)
+            assertTrue("第二个请求被丢了，实际收到 $got", got.contains(2))
+        } finally {
+            stop.set(true)
+            server.close()
+        }
+    }
+
+    /**
+     * **取走在飞的活儿时，不许把排队的抹掉。**
+     *
+     * 这条是「纠错时灵时不灵」的根因（真机复现过）。
+     *
+     * 提交一次上屏会**连着**发两个请求——先「下一词」，再「纠错」。
+     * 这两次调用之间只隔几微秒，而工作线程这时候往往**还没被调度起来**
+     * （手机上主线程正忙着，新建的工作线程要等调度器空出来）。
+     * 于是第二个请求进了「排队槽」；接着工作线程起来取活儿，
+     * 如果顺手把排队槽也清了，第二个请求就这么**静默丢了**。
+     *
+     * 这条测试直接摆出「在飞 + 排队」的状态再取一次，
+     * **确定性**——不靠线程调度碰运气。
+     */
+    @Test
+    fun `取走在飞的活儿时不能把排队的抹掉`() {
+        val client = LexemeClient("http://127.0.0.1:1") { }
+        client.inFlight = LexemeRequest(text = "在飞") to { }
+        client.queued = LexemeRequest(text = "排队") to { }
+
+        val first = client.takeJob()
+        assertNotNull("应该先取走在飞的那个", first)
+        assertEquals("在飞", first!!.first.text)
+        assertNotNull("取走在飞的之后，排队的那个不该被抹掉", client.queued)
+
+        val second = client.takeJob()
+        assertNotNull("排队的那个应该还能取出来", second)
+        assertEquals("排队", second!!.first.text)
     }
 
     // ---------------------------------------------------------------

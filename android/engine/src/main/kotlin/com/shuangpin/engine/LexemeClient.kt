@@ -102,8 +102,11 @@ class LexemeClient(
      *
      * **它绝不能被后来的请求顶掉**——已经在飞的东西就是发出去了，
      * 顶掉等于让服务端白收一次请求、客户端白等一次结果。
+     *
+     * （`internal` 是为了让单测能直接摆出「在飞 + 排队」的状态，
+     * 见 `LexemeClientTest`。）
      */
-    private var inFlight: Pair<LexemeRequest, (List<String>?) -> Unit>? = null
+    internal var inFlight: Pair<LexemeRequest, (List<String>?) -> Unit>? = null
 
     /**
      * 排队中的请求。
@@ -114,7 +117,7 @@ class LexemeClient(
      * 上屏后发的「下一词」请求还在飞，用户紧接着敲下一个字——
      * 这时发的「消歧」请求如果直接丢掉，功能就等于没有。
      */
-    private var queued: Pair<LexemeRequest, (List<String>?) -> Unit>? = null
+    internal var queued: Pair<LexemeRequest, (List<String>?) -> Unit>? = null
 
     /**
      * 请求联想建议。
@@ -152,19 +155,8 @@ class LexemeClient(
      */
     private fun loop() {
         while (true) {
-            val job = synchronized(lock) {
-                val j = inFlight ?: queued
-                inFlight = null
-                queued = null
-                if (j == null) {
-                    // 原子地告诉别人「我没活了」——
-                    // 这时候来的请求会自己起一个工作线程
-                    running = false
-                }
-                j
-            } ?: return
+            val (req, callback) = takeJob() ?: return
 
-            val (req, callback) = job
             var result: List<String>? = null
             var failure: Throwable? = null
             try {
@@ -180,6 +172,31 @@ class LexemeClient(
             }
             callback(result)
         }
+    }
+
+    /**
+     * 取下一个要处理的活儿。
+     *
+     * **取走在飞的不许动排队的。**
+     *
+     * 踩过这个坑：提交一次上屏会**连着**发两个请求——先「下一词」，再「纠错」。
+     * 这两次调用之间只隔几微秒，而工作线程这时候往往**还没被调度起来**
+     * （手机上主线程正忙着，新建的工作线程要等调度器空出来）。
+     * 于是第二个请求进了「排队槽」；接着工作线程起来取活儿，
+     * 如果顺手把排队槽也清掉，第二个请求就这么**静默丢了**。
+     *
+     * 表现是「纠错时灵时不灵」——下一词那次请求慢的时候更容易复现。
+     */
+    internal fun takeJob(): Pair<LexemeRequest, (List<String>?) -> Unit>? = synchronized(lock) {
+        val flying = inFlight
+        if (flying != null) {
+            inFlight = null
+            return@synchronized flying
+        }
+        val q = queued
+        queued = null
+        if (q == null) running = false
+        q
     }
 
     private fun doRequest(req: LexemeRequest): List<String>? =
@@ -321,11 +338,17 @@ class LexemeClient(
         private const val CONNECT_TIMEOUT_MS = 2000
 
         /**
-         * 读超时给得宽：模型本身要 1~2.5 秒出结果，慢的时候能到 5 秒。
+         * 读超时给得宽：模型本身要 1~2.5 秒出结果，慢的时候能到 5 秒，
+         * **推理型模型（MiniMax M2.5）偶尔要 12 秒以上**。
+         *
+         * 实测踩过：模型跑了 12.4 秒才回，客户端 10 秒就断了，
+         * 结果服务端明明返回了正确内容，客户端却当成失败——
+         * 「下一词」时灵时不灵的另一半原因。
+         *
          * 这是在后台线程跑的，超时再宽也不影响打字——
          * 超时只是「这次没等到」，不是「输入不能用」。
          */
-        private const val READ_TIMEOUT_MS = 10_000
+        private const val READ_TIMEOUT_MS = 20_000
     }
 }
 
