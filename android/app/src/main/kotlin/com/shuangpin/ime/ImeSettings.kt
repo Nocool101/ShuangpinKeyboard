@@ -41,6 +41,7 @@ class ImeSettings(context: Context) {
      * 协议：
      * - `service`：自建服务（`tools/lexeme_server.mjs`），**key 留在服务端**
      * - `openai`：直连厂商（OpenAI 兼容），key 存在本机
+     * - `anthropic`：直连厂商（Anthropic 兼容），key 存在本机
      */
     var llmProtocol: String
         get() = prefs.getString(KEY_LLM_PROTOCOL, PROTOCOL_SERVICE) ?: PROTOCOL_SERVICE
@@ -78,6 +79,19 @@ class ImeSettings(context: Context) {
     var keyLayout: String
         get() = prefs.getString(KEY_KEY_LAYOUT, KEY_LAYOUT_RIGHT) ?: KEY_LAYOUT_RIGHT
         set(v) = prefs.edit().putString(KEY_KEY_LAYOUT, v).apply()
+
+    /**
+     * 韵母位的排法：
+     * - `fixed`（默认）：**小鹤双拼标准布局**——每个韵母永远在它那个键上
+     * - `thumb`：单手模式下把韵母聚到拇指那一侧（按常用度重排）
+     *
+     * 默认选 `fixed`：用户反馈「目前的布局不容易记忆」。
+     * 重排过的那套每换一个声母就要重新认一遍键位，
+     * 固定之后肌肉记忆才立得住（ao 永远在 c、ian 永远在 m……）。
+     */
+    var finalArrange: String
+        get() = prefs.getString(KEY_FINAL_ARRANGE, FINAL_ARRANGE_FIXED) ?: FINAL_ARRANGE_FIXED
+        set(v) = prefs.edit().putString(KEY_FINAL_ARRANGE, v).apply()
 
     // ------------------------------------------------------------------
     // 端侧重排
@@ -208,6 +222,21 @@ class ImeSettings(context: Context) {
         /** 单手·左手。 */
         const val KEY_LAYOUT_LEFT = "left"
 
+        const val KEY_FINAL_ARRANGE = "key.finalArrange"
+
+        /** 韵母位固定在小鹤标准键位（默认）。 */
+        const val FINAL_ARRANGE_FIXED = "fixed"
+
+        /** 韵母位按拇指侧重排。 */
+        const val FINAL_ARRANGE_THUMB = "thumb"
+
+        /**
+         * 用户自学习词库的文件名（放在应用私有目录里）。
+         *
+         * 输入法服务和设置页都要用它——设置页的「清空已学词条」得删同一个文件。
+         */
+        const val USER_DICT_FILE = "user_dict.tsv"
+
         const val KEY_ASR_ENABLED = "asr.enabled"
         const val KEY_ASR_ENDPOINT = "asr.endpoint"
         const val KEY_ASR_PROTOCOL = "asr.protocol"
@@ -223,5 +252,8 @@ class ImeSettings(context: Context) {
 
         /** 直连厂商（OpenAI 兼容）协议。 */
         const val PROTOCOL_OPENAI = "openai"
+
+        /** 直连厂商（Anthropic 兼容）协议。 */
+        const val PROTOCOL_ANTHROPIC = "anthropic"
     }
 }

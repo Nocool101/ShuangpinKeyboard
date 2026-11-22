@@ -304,18 +304,26 @@ const INITS = ['zh','ch','sh','b','p','m','f','d','t','n','l','g','k','h','j','q
 /* y/w 是「整体认读」占位，韵母要特殊解析：ya→ia, ye→üe, yan→ian, yang→iang … */
 /* 整体认读音节的韵母归属。
  *
- * 小鹤的规则：y/w 后面的韵母按「完整韵母」取键位。
- *   羊 = y + ang → yh ；王 = w + uang → wl ；万 = w + uan → wr ；我 = w + uo → wo
+ * 小鹤的规则：y/w 后面的韵母按**实际的韵母**取键位。
+ *   羊 = y + ang → yh ；王 = w + ang → wh ；万 = w + uan → wr ；我 = w + o → wo
+ *
+ * ⚠ **「王/往/网」是 ang 韵母（键 h），不是 uang（键 l）**——
+ *   uang 是「光/双/装」那一类（uang/iang 共用 l 键），跟 wang 没关系。
+ *   以前这里写成了 wang:'uang'，结果按 w 之后韵母位上**没有 ang**，
+ *   「wang」根本打不出来（用户反馈「打不出 wang，按了 w 不显示 ang」）。
+ *   （以 rime-ice 的 flypy 官方 schema 为准：
+ *     xform/(.)ang$/$1Ⓗ → wang=wh；xform/[iu]ang$/Ⓛ 只管 iang/uang。）
  *
  * 这里只列**自然分解得不到**的那些：
  *   - u 要写成 ü(v)：于 yu=yv、月 yue=yt、元 yuan=yr、云 yun=yy
- *   - w 后面是完整的零声母韵母：娃 wa=wx、外 wai=wk
- * 其余（要 ya=ya、要 yao=yc、也 ye=ye、有 you=yz、眼 yan=yj、用 yong=ys…）
- * 自然分解就是对的，不用覆盖。
+ *   - wan 的韵母是 uan（wr），自然分解会当成 an（wj），得覆盖
+ *   - wang 的韵母是 ang（wh）
+ * 其余（要 ya=ya、要 yao=yc、也 ye=ye、有 you=yz、眼 yan=yj、用 yong=ys、
+ *       娃 wa=wa、外 wai=wd、窝 wo=wo…）自然分解就是对的，不用覆盖。
  */
 const YW_FIN = {
   yu:'v', yue:'ve', yuan:'van', yun:'vn',
-  wa:'ua', wo:'uo', wai:'uai', wan:'uan', wang:'uang'
+  wan:'uan', wang:'ang'
 };
 
 function parseSyl(s){

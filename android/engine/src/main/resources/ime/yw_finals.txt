@@ -3,8 +3,5 @@ yu	v
 yue	ve
 yuan	van
 yun	vn
-wa	ua
-wo	uo
-wai	uai
 wan	uan
-wang	uang
+wang	ang

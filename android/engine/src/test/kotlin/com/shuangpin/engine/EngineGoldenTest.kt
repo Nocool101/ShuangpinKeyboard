@@ -24,7 +24,7 @@ class EngineGoldenTest {
         @BeforeClass
         @JvmStatic
         fun load() {
-            data = DataLoader().load()
+            data = TestData.data
             xiaohe = data.engine("xiaohe")
             ziranma = data.engine("ziranma")
         }
@@ -72,6 +72,40 @@ class EngineGoldenTest {
         for ((pinyin, expected) in cases) {
             assertEquals("encode($pinyin)", expected, xiaohe.encode(pinyin))
         }
+    }
+
+    // ---------------------------------------------------------------
+    // y/w 开头（整体认读）：wang 必须是 w + h
+    // ---------------------------------------------------------------
+
+    @Test
+    fun `wang 编码是 wh`() {
+        // 「王/往/网」的韵母是 **ang**（h 键），不是 uang（l 键）——
+        // uang 是「光/双/装」那一类。原型里写成 wang:'uang' 时，
+        // 按 w 之后韵母位上没有 ang，「wang」根本打不出来
+        // （用户反馈「打不出 wang，按了 w 不显示 ang」）。
+        assertEquals("encode(wang)", "wh", xiaohe.encode("wang"))
+        assertEquals("encode(wan)", "wr", xiaohe.encode("wan"))
+        assertEquals("encode(wai)", "wd", xiaohe.encode("wai"))
+        assertEquals("encode(wei)", "ww", xiaohe.encode("wei"))
+        assertEquals("encode(wa)", "wa", xiaohe.encode("wa"))
+        assertEquals("encode(wo)", "wo", xiaohe.encode("wo"))
+    }
+
+    @Test
+    fun `按 w 之后 ang 可选`() {
+        // 韵母位上必须能选到 ang（h 键）
+        val finals = xiaohe.resolveFinals("w")
+        assertTrue("按 w 之后应该有 ang（h 键），实际：${finals.keys}", finals.containsKey("h"))
+        assertEquals("wang", finals["h"]?.syllable)
+    }
+
+    @Test
+    fun `w 加 h 能打出 wang`() {
+        val session = InputSession(xiaohe)
+        assertTrue(session.pressKey("w"))
+        assertTrue(session.pressKey("h"))
+        assertEquals("wang", session.pinyin)
     }
 
     /**
@@ -323,8 +357,10 @@ class EngineGoldenTest {
 
     @Test
     fun `整体认读音节的编码`() {
-        // 小鹤规则：y/w 后面的韵母按「完整韵母」取键位
-        // 羊 = y + ang → yh；王 = w + uang → wl；万 = w + uan → wr
+        // 小鹤规则：y/w 后面的韵母按**实际的韵母**取键位
+        // 羊 = y + ang → yh；王 = w + ang → wh；万 = w + uan → wr
+        //（以前「王」写成了 w + uang → wl，那是错的：
+        //  按 w 之后韵母位上没有 ang，「wang」根本打不出来。）
         val cases = mapOf(
             "yang" to "yh",   // 羊
             "yan" to "yj",    // 眼
@@ -339,9 +375,9 @@ class EngineGoldenTest {
             "yuan" to "yr",   // 元
             "yun" to "yy",    // 云
             "wo" to "wo",     // 我
-            "wang" to "wl",   // 王
+            "wang" to "wh",   // 王 —— 韵母是 **ang**（h 键），不是 uang（l 键）
             "wan" to "wr",    // 万
-            "wai" to "wk",    // 外
+            "wai" to "wd",    // 外
             "wei" to "ww",    // 喂
             "wen" to "wf",    // 问
             "weng" to "wg",   // 翁

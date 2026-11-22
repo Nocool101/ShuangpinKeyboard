@@ -143,7 +143,7 @@ foreach ($sm in $schemeArrRe.Matches($ccBlock)) {
 Set-Content -Path (Join-Path $out 'check_cases.txt') -Value $sb.ToString() -Encoding UTF8 -NoNewline
 
 Write-Host "抽取完成 -> $out"
-Get-ChildItem $out | Sort-Object Name | ForEach-Object {
+Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
     $n = (Get-Content $_.FullName -Encoding UTF8 | Where-Object { $_ -and -not $_.StartsWith('#') }).Count
     Write-Host ("  {0,-20} {1,6} 条" -f $_.Name, $n)
 }

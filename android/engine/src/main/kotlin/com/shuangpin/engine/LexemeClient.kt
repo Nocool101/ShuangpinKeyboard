@@ -65,13 +65,26 @@ data class LexemeRequest(
  *   {"next":["智慧"]}
  * ```
  *
- * 也支持**直连厂商**（OpenAI 兼容）：
+ * 也支持**直连厂商**：
+ *
+ * - OpenAI 兼容（`/chat/completions`）：
  * ```
  * POST {endpoint}/chat/completions
  *   {"model":"xxx","messages":[{"role":"user","content":"..."}]}
  * →  200
  *   {"choices":[{"message":{"content":"{\"next\":[\"智慧\"]}"}}]}
  * ```
+ *
+ * - Anthropic 兼容（`/v1/messages`）：
+ * ```
+ * POST {endpoint}/v1/messages
+ *   Headers: x-api-key: <key>, anthropic-version: 2023-06-01
+ *   {"model":"xxx","max_tokens":512,"system":"...","messages":[...]}
+ * →  200
+ *   {"content":[{"type":"text","text":"{\"next\":[\"智慧\"]}"}]}
+ * ```
+ *   MiniMax / Claude 这类地址（`…/anthropic`）都是这一套：
+ *   **拿 OpenAI 的路径去打会 404**，所以地址里带 `/anthropic` 时自动走这条。
  *
  * **失败一律当没有**：网络不通、服务端 500、返回看不懂——都只是没有联想建议，
  * 输入法该怎样还怎样（联想是加分项，不是依赖项）。
@@ -200,7 +213,58 @@ class LexemeClient(
     }
 
     private fun doRequest(req: LexemeRequest): List<String>? =
-        if (protocol == PROTOCOL_OPENAI) doOpenAi(req) else doService(req)
+        when {
+            usesAnthropic() -> doAnthropic(req)
+            protocol == PROTOCOL_OPENAI -> doOpenAi(req)
+            else -> doService(req)
+        }
+
+    /**
+     * 这次请求是不是走 **Anthropic 兼容**协议。
+     *
+     * 两种情况都算：
+     * - 协议明确选了「Anthropic 兼容」
+     * - 协议是「直连厂商」，但地址里带着 `/anthropic`
+     *   （MiniMax、Claude 这类的地址长这样）。
+     *   **这种必须走 Anthropic 协议**：OpenAI 那条路是 `…/chat/completions`，
+     *   拿它去打 `/anthropic` 会 404——用户填了地址却连不上，多半就栽在这里。
+     */
+    private fun usesAnthropic(): Boolean =
+        protocol == PROTOCOL_ANTHROPIC || endpoint.contains("/anthropic", ignoreCase = true)
+
+    /**
+     * 直连 Anthropic 兼容厂商：`POST {endpoint}/v1/messages`。
+     *
+     * 跟 OpenAI 那套三处不同：
+     * - 头：`x-api-key` + `anthropic-version`（不是 `Authorization: Bearer`）
+     * - 体：`system` 是单独的字段，不是 messages 里的一条
+     * - 响应：正文在 `content[].text`（可能还夹着 thinking 块，要跳过）
+     */
+    private fun doAnthropic(req: LexemeRequest): List<String>? {
+        val url = endpoint.trimEnd('/').let {
+            if (it.endsWith("/v1/messages")) it else "$it/v1/messages"
+        }
+        val conn = open(url)
+        applyApiKey(conn, req.apiKey, anthropic = true)
+        try {
+            writeBody(conn, buildAnthropicBody(req))
+            val code = conn.responseCode
+            if (code != 200) {
+                onError("HTTP $code")
+                return null
+            }
+            val resp = readBody(conn)
+            val obj = MiniJson.parseObject(resp)
+            // content 是一串块：thinking 块没有 text，只有 text 块有
+            val text = obj.objList("content")
+                .mapNotNull { it.string("text") }
+                .joinToString("\n")
+            if (text.isBlank()) return null
+            return parseNextFromText(text)
+        } finally {
+            conn.disconnect()
+        }
+    }
 
     /** 自建服务：`POST {endpoint}/lexeme`。 */
     private fun doService(req: LexemeRequest): List<String>? {
@@ -228,7 +292,11 @@ class LexemeClient(
      * 要先把它抠出来再解析（模型偶尔会带解释或代码块）。
      */
     private fun doOpenAi(req: LexemeRequest): List<String>? {
-        val conn = open(endpoint.trimEnd('/') + "/chat/completions")
+        val url = endpoint.trimEnd('/').let {
+            if (it.endsWith("/chat/completions")) it else "$it/chat/completions"
+        }
+        val conn = open(url)
+        applyApiKey(conn, req.apiKey, anthropic = false)
         try {
             val body = buildOpenAiBody(req)
             writeBody(conn, body)
@@ -244,6 +312,22 @@ class LexemeClient(
             return parseNextFromText(content)
         } finally {
             conn.disconnect()
+        }
+    }
+
+    /**
+     * 把 API key 放进请求头。
+     *
+     * ⚠ 以前**根本没发**，直连厂商这条路等于永远 401——
+     * 现在协议对、地址对的话就能真的连上。
+     */
+    private fun applyApiKey(conn: HttpURLConnection, key: String, anthropic: Boolean) {
+        if (key.isBlank()) return
+        if (anthropic) {
+            conn.setRequestProperty("x-api-key", key)
+            conn.setRequestProperty("anthropic-version", "2023-06-01")
+        } else {
+            conn.setRequestProperty("Authorization", "Bearer $key")
         }
     }
 
@@ -295,6 +379,23 @@ class LexemeClient(
         return sb.toString()
     }
 
+    /**
+     * 拼 Anthropic 兼容的请求体。
+     *
+     * 和 OpenAI 那版的差别：`system` 是顶层字段，不塞进 messages。
+     */
+    private fun buildAnthropicBody(req: LexemeRequest): String {
+        val sb = StringBuilder()
+        sb.append("{\"model\":").append(jsonString(req.model))
+        sb.append(",\"max_tokens\":512")
+        sb.append(",\"temperature\":").append(req.temperature)
+        sb.append(",\"system\":").append(jsonString(LexemePrompts.systemFor(req)))
+        sb.append(",\"messages\":[{\"role\":\"user\",\"content\":")
+            .append(jsonString(LexemePrompts.userFor(req)))
+            .append("}]}")
+        return sb.toString()
+    }
+
     /** 从模型的文字回复里抠出 next 数组。 */
     private fun parseNextFromText(text: String): List<String> {
         var s = text.trim()
@@ -335,6 +436,9 @@ class LexemeClient(
         /** 直连厂商（OpenAI 兼容）协议。 */
         const val PROTOCOL_OPENAI = "openai"
 
+        /** 直连厂商（Anthropic 兼容）协议。 */
+        const val PROTOCOL_ANTHROPIC = "anthropic"
+
         private const val CONNECT_TIMEOUT_MS = 2000
 
         /**
@@ -349,6 +453,53 @@ class LexemeClient(
          * 超时只是「这次没等到」，不是「输入不能用」。
          */
         private const val READ_TIMEOUT_MS = 20_000
+    }
+}
+
+/**
+ * 下一词建议的清洗。
+ *
+ * 云端模型收到上文「火焰」，很爱回「火焰山」——它把**整句**都给了出来。
+ * 但候选栏里的这个词是**接着上文往上加**的：
+ * 显示「火焰山」，用户点一下得到的是「火焰火焰山」，上文重复了一遍。
+ *
+ * 所以这里把「上文的后缀 ∩ 词的前缀」削掉：
+ * 「火焰山」→「山」，用户点一下才是「火焰山」。
+ */
+object NextWords {
+
+    /**
+     * 削掉一个建议词里与上文重复的前缀。
+     *
+     * @return 削完之后真正要接着打的那部分；
+     *         削完是空的（这个词整个落在上文里）就返回 null（这个候选没用）。
+     */
+    fun stripContext(word: String, context: String): String? {
+        val w = word.trim()
+        if (w.isEmpty()) return null
+        if (context.isEmpty()) return w
+        val max = minOf(context.length, w.length)
+        // 从长到短找：削得越多越像「模型在重复上文」
+        for (n in max downTo 1) {
+            if (context.endsWith(w.substring(0, n))) {
+                return w.substring(n).ifEmpty { null }
+            }
+        }
+        return w
+    }
+
+    /**
+     * 清洗一整批建议：削掉与上文重复的部分，去掉空的，去重。
+     *
+     * @param context 发给模型时用的那段上文（要和模型看到的完全一致）
+     */
+    fun clean(words: List<String>, context: String): List<String> {
+        val out = LinkedHashSet<String>()
+        for (w in words) {
+            val s = stripContext(w, context) ?: continue
+            out += s
+        }
+        return out.toList()
     }
 }
 
@@ -401,7 +552,9 @@ object LexemePrompts {
         2. 每个候选必须是 1~4 个汉字组成的**词**，不要标点、不要单字、不要解释；
         3. 候选必须和这个拼音对得上（zhihui → 智慧/指挥/知会 这种）；
         4. 结合上文判断哪个更可能；
-        5. 只输出 JSON，形如 {"next":["词1","词2"]}，不要任何多余文字。
+        5. **只输出这个拼音对应的词，不要把上文重复出来**
+           （上文「火焰」+ 拼音 shan → 候选「山峰」，不是「火焰山峰」）；
+        6. 只输出 JSON，形如 {"next":["词1","词2"]}，不要任何多余文字。
     """
 
     /** 下一词：只给了上文，预测接下来打什么。 */
@@ -412,8 +565,11 @@ object LexemePrompts {
         1. 给 3 个候选，按可能性从高到低；
         2. 每个候选必须是 1~3 个汉字组成的**词**，不要标点、不要单字、不要解释；
         3. 候选要能直接接在上文后面，读起来自然；
-        4. 不要重复上文里已经出现的词；
-        5. 只输出 JSON，形如 {"next":["词1","词2","词3"]}，不要任何多余文字。
+        4. **只输出要接着打的那部分，不要把上文重复出来**
+           （上文「火焰」→ 候选是「山」，不是「火焰山」——
+            候选是要**接在上文后面**的，重复一遍上文就重了）；
+        5. 不要重复上文里已经出现的词；
+        6. 只输出 JSON，形如 {"next":["词1","词2","词3"]}，不要任何多余文字。
     """
 
     /**

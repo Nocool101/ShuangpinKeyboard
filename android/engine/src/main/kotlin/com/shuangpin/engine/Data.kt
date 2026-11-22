@@ -373,6 +373,17 @@ class Dictionary(
 ) {
     fun charCandidates(syllable: String): List<WordCand> = chars[syllable] ?: emptyList()
 
+    /**
+     * 候选字（按词频降序），**一个汉字一个元素**。
+     *
+     * 别用 [charsOf] 拿到字符串再按字符切：
+     * 扩展区的字（𫘪、𠒜 这种）在 UTF-16 里是**两个码元**，
+     * 按码元切会劈成两个乱码。字表里每个字本来就是一个完整的字符串，
+     * 直接取它的 text 才是对的。
+     */
+    fun charList(syllable: String): List<String> =
+        charCandidates(syllable).map { it.text }
+
     /** 候选字连写（按词频降序），兼容旧的用法。 */
     fun charsOf(syllable: String): String =
         charCandidates(syllable).joinToString("") { it.text }

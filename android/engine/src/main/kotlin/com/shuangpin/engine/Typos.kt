@@ -85,17 +85,30 @@ object Typos {
     ): List<Correction> {
         if (syllables.isEmpty()) return emptyList()
         val originalKey = syllables.joinToString("")
-        val originalScore = dictionary.phraseCands(originalKey).firstOrNull()?.score ?: 0
+        // top() 只解析首个候选（纠错每次按键都要跑，别把整个候选列表都建出来）
+        val original = dictionary.phrases.top(originalKey)
+        val originalScore = original?.score ?: 0
+
+        // **原串在词库里根本没有** → 用户百分之百打错了，
+        // 这时候把「同声母换韵母」的全量变体也试一遍。
+        //
+        // 为什么要加这一档：双拼最高频的手误是**韵母键按错**
+        // （"xianrenfuwoding" 的 en 在 f 键上，手滑按成 i 键就成了 "xianrifuwoding"）。
+        // 这跟 zh/z 那种近音混淆不一样,近音组里根本没有 i↔en 这一对,
+        // 老规则完全认不出来——而用户的意图明明白白写着「仙人抚我顶」。
+        //
+        // 只在「原串查无此词」时开这一档：原串要是能查到,
+        // 那用户可能就是故意打冷门词,不该乱改。
+        val wide = original == null
 
         val out = LinkedHashMap<String, Correction>()
         for (i in syllables.indices) {
-            for (alt in alternatives(table, syllables[i])) {
-                if (out.size >= MAX_CORRECTIONS) return out.values.sortedByDescending { it.score }
+            for (alt in alternatives(table, syllables[i], wide)) {
                 val variant = syllables.toMutableList()
                 variant[i] = alt
                 val key = variant.joinToString("")
                 if (key == originalKey) continue
-                val cand = dictionary.phraseCands(key).firstOrNull() ?: continue
+                val cand = dictionary.phrases.top(key) ?: continue
                 // 必须是整词：字数等于音节数，单字不算「纠正」
                 if (cand.text.length != syllables.size) continue
                 // 词频没明显更高 → 不是纠正，是更冷门的写法
@@ -109,13 +122,18 @@ object Typos {
                 )
             }
         }
-        return out.values.sortedByDescending { it.score }
+        // 按分数取前几个——**不要按位置截断**：
+        // 错的那个音节可能在第 3 个（"xian|ri|fu|wo|ding" 的第 2 个），
+        // 按位置截的话正确答案根本轮不到。
+        return out.values.sortedByDescending { it.score }.take(MAX_CORRECTIONS)
     }
 
     /**
      * 某个音节的近音变体（只保留合法音节）。
+     *
+     * @param wide 加上「同声母换任意韵母」这一档（只在原串查无此词时用）
      */
-    fun alternatives(table: SyllableTable, syllable: String): List<String> {
+    fun alternatives(table: SyllableTable, syllable: String, wide: Boolean = false): List<String> {
         val parsed = table.parse(syllable)
         val initial = parsed.initial
         val final = parsed.final
@@ -144,6 +162,23 @@ object Typos {
                     table.byInitialFinal["$initial|$alt"]
                 } ?: continue
                 out.add(syl)
+            }
+        }
+
+        // 宽规则：同声母的**所有**韵母都试一遍（手滑按错韵母键的兜底）
+        if (wide) {
+            if (initial != null) {
+                for (fin in table.finalsByInitial[initial].orEmpty()) {
+                    if (fin == final) continue
+                    val syl = table.byInitialFinal["$initial|$fin"] ?: continue
+                    out.add(syl)
+                }
+            } else {
+                // 零声母：把零声母的那几个音节都试一遍
+                for ((fin, syl) in table.zeroSyllables) {
+                    if (syl == syllable) continue
+                    out.add(syl)
+                }
             }
         }
         return out.toList()

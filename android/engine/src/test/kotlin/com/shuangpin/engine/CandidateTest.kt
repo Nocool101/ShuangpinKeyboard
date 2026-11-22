@@ -23,7 +23,7 @@ class CandidateTest {
         @BeforeClass
         @JvmStatic
         fun load() {
-            data = DataLoader().load()
+            data = TestData.data
             engine = data.engine("xiaohe")
         }
     }

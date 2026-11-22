@@ -24,7 +24,7 @@ class KeyboardFaceTest {
         @BeforeClass
         @JvmStatic
         fun load() {
-            data = DataLoader().load()
+            data = TestData.data
             engine = data.engine("xiaohe")
         }
     }
@@ -81,15 +81,31 @@ class KeyboardFaceTest {
     }
 
     @Test
-    fun `w 之后 o 键主标签是 uo 角标是 o`() {
+    fun `w 之后 o 键主标签是 o 角标是 o`() {
         session.pressKey("w")
         assertEquals(InputStage.FINAL, session.stage)
 
         val o = face("o")
-        assertEquals("韵母位主标签是韵母 uo", "uo", o.big)
+        // 「窝/我」的韵母是 **o**（o 键）——不是 uo。
+        // （以前 yw_finals 里写的是 wo:'uo'，按 w 之后 o 键显示 uo，
+        //  害得「wang」打不出来：ang 根本不在可选的韵母里。）
+        assertEquals("韵母位主标签是韵母 o", "o", o.big)
         assertEquals("键位字母放在角标", "o", o.badge)
         assertFalse("o 键在 w 后面是合法的", o.dead)
         assertTrue(o.accent)
+    }
+
+    @Test
+    fun `w 之后 h 键是 ang`() {
+        // 「王/往/网」= w + h（ang）——这是「wang」能打出来的关键
+        session.pressKey("w")
+        assertEquals(InputStage.FINAL, session.stage)
+
+        val h = face("h")
+        assertEquals("韵母位主标签是韵母 ang", "ang", h.big)
+        assertEquals("键位字母放在角标", "h", h.badge)
+        assertFalse("h 键在 w 后面是合法的", h.dead)
+        assertTrue(h.accent)
     }
 
     @Test

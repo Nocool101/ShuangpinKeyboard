@@ -11,6 +11,19 @@ data class FinalHit(
     val fin: String,
     val finals: List<String>,
     val syllable: String?,
+    /**
+     * 声母那一部分的**拼音**（"xian" 的声母部分是 "x"；零声母是空串）。
+     *
+     * 用来判断「把这个音节截短之后是不是只剩声母」——
+     * 是的话就该退回「半截音节」状态，用户接着按韵母键就能补上。
+     */
+    val initialPinyin: String = "",
+    /**
+     * 声母的**键位**（小鹤：zh→v、ch→i、sh→u）。零声母为 null。
+     *
+     * 退回「半截音节」时用它当 firstKey。
+     */
+    val initialKey: String? = null,
 ) {
     val isAmbiguous: Boolean get() = finals.size > 1
 }
@@ -248,6 +261,17 @@ enum class CandidateKind {
 
     /** 单字候选 */
     CHAR,
+
+    /**
+     * **用户自学习词**。
+     *
+     * 用户自己打出来过的词——词库里根本没有的也行
+     * （游戏专有名词「炼气士」、人名、缩写……）。
+     *
+     * 打过一次之后再打同样的拼音，它就排在候选栏**第一位**。
+     * 见 [UserDict]。
+     */
+    USER,
 }
 
 /**
@@ -256,11 +280,25 @@ enum class CandidateKind {
  * @param promoted 是否被云端「按上文消歧」提到了前面。
  *                 它只是个标记，不改变候选本身的类别——
  *                 被提升的词还是词、还是整句，只是排序变了、样式上给个提示。
+ * @param pinyin 单字候选属于**哪个音节**（别的候选是 null）。
+ *               候选栏在字上面标出这个拼音，用户才知道这个字是哪来的，
+ *               点它就能单独改那个音节。
  */
 data class Candidate(
     val text: String,
     val kind: CandidateKind,
     val promoted: Boolean = false,
+    val pinyin: String? = null,
+    /**
+     * 是不是**整串精确命中**——这一串拼音本身就是词库里的一个词
+     * （"xianrenfuwoding" → 「仙人抚我顶」）。
+     *
+     * 这是**最强的信号**：比任何分词结果都强，
+     * 所以它排第一，而且**不参与端侧重排**——
+     * 端侧模型只见过常用词，碰到生僻的整词反而会把它排下去
+     * （用户明明打对了 "xianrenfuwoding"，却被排成「现任服我定」）。
+     */
+    val exact: Boolean = false,
 )
 
 /**
@@ -287,7 +325,13 @@ object Candidates {
      * 不限流的话候选栏会有中位 34 个候选（9 页），没人愿意翻。
      * 限到 12 个之后中位降到 16 个（4 页），而常用的字本来就在前面。
      */
-    const val MAX_CHAR = 12
+    /**
+     * 单字候选最多给多少个。
+     *
+     * 24 是因为现在**每个音节**都要给字（用户要能选到前面的音节），
+     * 两个音节各 12 个正好；音节更多时每个音节分到 4~8 个。
+     */
+    const val MAX_CHAR = 24
 
     /**
      * 整句的备选切分给几个。
@@ -301,7 +345,10 @@ object Candidates {
     /**
      * 装配候选栏内容。
      *
-     * 顺序：**整句 → 整串命中 → 分出来的词 → 长词扩展 → 单字**。
+     * 顺序：**用户自学习词 → 自动纠错 → 整句 → 整串命中 → 分出来的词 → 长词扩展 → 单字**。
+     *
+     * 用户自学习词排最前：那是用户**明确打出来过**的东西，
+     * 没有任何候选比它更贴近用户此刻的意图。
      *
      * 扩展排在单字前面：它比单字精确得多，单字是最不靠谱的兜底。
      *
@@ -309,6 +356,7 @@ object Candidates {
      *        **默认关**——端侧模型评估用的候选池必须是固定的，
      *        纠错候选会改变池子的构成，混进去基线就没法比了。
      *        App 端显式打开。
+     * @param userDict 用户自学习词库。默认取引擎上挂的那个（评估端是 null）。
      */
     fun build(
         engine: PinyinEngine,
@@ -317,13 +365,34 @@ object Candidates {
         maxExtension: Int = MAX_EXTENSION,
         maxChar: Int = MAX_CHAR,
         includeCorrections: Boolean = false,
+        userDict: UserDict? = engine.userDict,
     ): List<Candidate> {
         val out = ArrayList<Candidate>()
         // 去重：整句、词、扩展、单字四层经常重叠
         // （比如整句就是"你"，字表第一位也是"你"）
         val seen = HashSet<String>()
 
-        // ⓪ 自动纠错：拼音打错了？把更像的词提上来。
+        // ⓪ 用户自学习词：用户打过的词排最前。
+        // 词库里没有的词（「炼气士」）也能进候选栏——这正是自学习词库的意义。
+        if (userDict != null) {
+            for (entry in userDict.lookup(session.pinyin)) {
+                if (entry.word.isEmpty()) continue
+                if (seen.add(entry.word)) out += Candidate(entry.word, CandidateKind.USER)
+            }
+        }
+
+        // ⓪b **整串精确命中**：这一串拼音本身就是词库里的一个词
+        //    （"xianrenfuwoding" → 「仙人抚我顶」）
+        //
+        //    排最前，因为它是**最强的信号**——比任何分词结果都强。
+        //    引擎自己的 commitTop() 也是这么选的（整串命中优先于分词），
+        //    候选栏的顺序跟它对齐，用户看到的和空格上屏的才是同一个。
+        val exactText = engine.phraseFor(session.pinyin)
+        if (exactText != null && seen.add(exactText)) {
+            out += Candidate(exactText, CandidateKind.SENTENCE, exact = true)
+        }
+
+        // ① 自动纠错：拼音打错了？把更像的词提上来。
         // 放在最前面——用户按空格就上屏它，这就是「自动」。
         if (includeCorrections) {
             val syllables = session.pending.map { it.syllable ?: "" }
@@ -332,40 +401,54 @@ object Candidates {
             }
         }
 
-        // ① 整句候选（分词后拼起来），排最前
+        // ② 整句候选（分词后拼起来）
         val sentence = session.sentence
         if (sentence.isNotEmpty() && seen.add(sentence)) {
             out += Candidate(sentence, CandidateKind.SENTENCE)
         }
 
-        // ② 整句的备选切分（等长候选）——重排模型能发挥的地方
+        // ③ 整句的备选切分（等长候选）——重排模型能发挥的地方
         for (alt in session.alternativeSentences) {
             if (seen.add(alt)) out += Candidate(alt, CandidateKind.SENTENCE_ALT)
         }
 
-        // ② 整串在词库里的其它命中
+        // ④ 整串在词库里的其它命中
         for (word in session.phraseCandidates.take(maxPhrase)) {
             if (seen.add(word)) out += Candidate(word, CandidateKind.WORD)
         }
 
-        // ③ 分出来的各个词
+        // ⑤ 分出来的各个词
         for (word in session.segmentWords.take(maxPhrase)) {
             if (seen.add(word)) out += Candidate(word, CandidateKind.WORD)
         }
 
-        // ④ 长词扩展（联想）：「你好」之外再给「你好吗」「你好啊」
+        // ⑥ 长词扩展（联想）：「你好」之外再给「你好吗」「你好啊」
         for (cand in engine.extensions(session.pinyin, maxExtension)) {
             if (seen.add(cand.text)) out += Candidate(cand.text, CandidateKind.EXTENSION)
         }
 
-        // ⑤ 单字（限流：最后一个音节的候选字有一大堆生僻字，全放进来会把候选栏撑爆）
+        // ⑦ 单字（限流：候选字有一大堆生僻字，全放进来会把候选栏撑爆）
+        //
+        // **每个音节的字都给**，不只是最后一个音节——
+        // 用户反馈「多个字或者句子，右划选词区要能从前选择」：
+        // 原来只给最后一个音节的字，前面那些音节根本改不了。
+        // 最后一个音节的字排前面（最常要改的就是它），前面的音节往后排，
+        // 往右划就能选到。每个字都带着**自己那个音节的拼音**（角标上显示），
+        // 点角标就能单独改那个音节。
         var charCount = 0
-        for (ch in session.candidates) {
-            if (charCount >= maxChar) break
-            val s = ch.toString()
-            if (!seen.add(s)) continue
-            out += Candidate(s, CandidateKind.CHAR)
-            charCount++
+        val charSyllables = session.pending.map { it.syllable ?: "" }.reversed()
+        // 每个音节至少 4 个字（不然多音节时一个都挑不到），再多就按总数平分
+        val perSyllable = maxOf(4, maxChar / charSyllables.size.coerceAtLeast(1))
+        for (syl in charSyllables) {
+            if (syl.isEmpty()) continue
+            var taken = 0
+            for (s in engine.candidateCharList(syl)) {
+                if (charCount >= maxChar || taken >= perSyllable) break
+                if (!seen.add(s)) continue
+                out += Candidate(s, CandidateKind.CHAR, pinyin = syl)
+                charCount++
+                taken++
+            }
         }
         return out
     }
@@ -422,6 +505,16 @@ class PinyinEngine(
      */
     @Volatile
     var dictionary: Dictionary = initialDictionary
+
+    /**
+     * **用户自学习词库**。
+     *
+     * 挂着它，候选装配就会把用户打过的词提到最前面（见 [Candidates.build]）。
+     * 评估端不挂（null），候选池才是固定的，基线才可比。
+     */
+    @Volatile
+    var userDict: UserDict? = null
+
     /**
      * 给定第一键，算出所有合法的第二键。
      *
@@ -437,6 +530,9 @@ class PinyinEngine(
                     fin = entry.fin,
                     finals = listOf(entry.fin),
                     syllable = entry.syllable,
+                    // 零声母不贡献拼音（「ai」整体就是韵母「ai」）
+                    initialPinyin = "",
+                    initialKey = null,
                 )
             }
             return out
@@ -458,10 +554,19 @@ class PinyinEngine(
                 finals = list,
                 // 歧义已由音节合法性消解，取首个（合法）韵母对应的音节
                 syllable = table.byInitialFinal["$initial|${list[0]}"],
+                initialPinyin = initialPinyinOf(initial),
+                initialKey = firstKey,
             )
         }
         return out
     }
+
+    /**
+     * 声母那一部分的拼音。
+     *
+     * 「zh/ch/sh」是两个字母，其余是一个字母——声母的拼音就是它自己。
+     */
+    private fun initialPinyinOf(initial: String): String = initial
 
     /**
      * 全拼 -> 双拼编码。
@@ -492,6 +597,15 @@ class PinyinEngine(
     /** 音节的候选字（按频率降序）。 */
     fun candidateChars(syllable: String): String = dictionary.charsOf(syllable)
 
+    /**
+     * 音节的候选字，**一个汉字一个元素**。
+     *
+     * 要逐字处理（候选栏、选字面板）就用这个：
+     * [candidateChars] 返回的是连写字符串，按 UTF-16 码元切会把
+     * 扩展区的字（𫘪 这种）劈成两个乱码。
+     */
+    fun candidateCharList(syllable: String): List<String> = dictionary.charList(syllable)
+
     /** 拼音串对应的词（最高频的那个）。 */
     fun phraseFor(pinyin: String): String? = dictionary.phraseOf(pinyin)
 
@@ -521,6 +635,35 @@ class PinyinEngine(
         segmentPaths(syllables, 1).firstOrNull()?.words ?: emptyList()
 
     /**
+     * 分词结果，**带上每个词覆盖的音节**。
+     *
+     * 返回 `(拼音切片, 词)`：拼音切片是这些音节拼起来的拼音串。
+     *
+     * 用户自学习词库靠它把「我打出来的这一句」拆成一个个词去记：
+     * 「我想吃饭」记成 `woxiang→我想` + `chifan→吃饭`，
+     * 下次只打「chifan」就能直接出「吃饭」。
+     *
+     * 词长和音节数对不上的（词库里有极少数这种怪词）会被跳过——
+     * 对不上就不知道这个词对应哪几个音节，记了也是错的。
+     */
+    fun segmentUnits(syllables: List<String>): List<Pair<String, String>> {
+        val path = segmentPaths(syllables, 1).firstOrNull() ?: return emptyList()
+        val out = ArrayList<Pair<String, String>>()
+        var idx = 0
+        for (i in path.words.indices) {
+            val word = path.words[i]
+            val count = path.counts.getOrNull(i) ?: break
+            val end = (idx + count).coerceAtMost(syllables.size)
+            if (word.length == count && end > idx) {
+                out += syllables.subList(idx, end).joinToString("") to word
+            }
+            idx = end
+            if (idx >= syllables.size) break
+        }
+        return out
+    }
+
+    /**
      * 整句的 N-best 切分。
      *
      * [segmentWords] 只给出一条最优切分，于是**等长候选几乎总是只有一条**——
@@ -544,7 +687,7 @@ class PinyinEngine(
     }
 
     /** 一条切分路径。 */
-    private data class Path(val score: Int, val words: List<String>) {
+    private data class Path(val score: Int, val words: List<String>, val counts: List<Int>) {
         val sentence: String get() = words.joinToString("")
     }
 
@@ -563,7 +706,7 @@ class PinyinEngine(
 
         // 每个位置保留 K 条最优路径
         val best = arrayOfNulls<MutableList<Path>>(n + 1)
-        best[0] = mutableListOf(Path(0, emptyList()))
+        best[0] = mutableListOf(Path(0, emptyList(), emptyList()))
 
         for (j in 1..n) {
             val bucket = ArrayList<Path>()
@@ -573,7 +716,7 @@ class PinyinEngine(
                 val cand = candidateFor(key, j - i == 1) ?: continue
                 val edge = cand.score + LONG_BONUS * (j - i - 1) - WORD_PENALTY
                 for (p in prev) {
-                    bucket.add(Path(p.score + edge, p.words + cand.text))
+                    bucket.add(Path(p.score + edge, p.words + cand.text, p.counts + (j - i)))
                 }
             }
             if (bucket.isEmpty()) continue
@@ -660,6 +803,28 @@ class InputSession(private val engine: PinyinEngine) {
     /** 本轮已输入的音节序列（用于词组匹配）。 */
     val pending: MutableList<FinalHit> = mutableListOf()
 
+    /**
+     * **下一个音节插在 [pending] 的哪个位置**（0..pending.size）。
+     *
+     * 正常情况下 == pending.size（在末尾接着打）。
+     *
+     * 用户把光标点到拼音中间时它会 < pending.size——
+     * 接着打的键插在那儿，后面已经打好的音节（`pending[insertAt..]`）跟在后头。
+     * 这就是「拼音打错了，点一下就能改」的实现。
+     */
+    var insertAt: Int = 0
+        private set
+
+    /**
+     * **光标在预编辑区里的字符偏移**。
+     *
+     * 默认在末尾（= [composingText].length）。
+     * 用户点了拼音中间它就会变小——这时退格删的是**光标前面那个字**，
+     * 不是最后一个字。
+     */
+    var caret: Int = 0
+        private set
+
     /** 已上屏文本。 */
     var committed: String = ""
         private set
@@ -676,17 +841,71 @@ class InputSession(private val engine: PinyinEngine) {
      * 注意：已经完成的音节要一直留在预编辑区里。
      * 敲完 "ni" 再敲下一个音节的第一个键时，这里必须显示 "nih" 而不是 "h"，
      * 否则前面那个音节会在用户眼皮底下消失。
+     *
+     * 光标在中间时，顺序也按视觉顺序来：
+     * `pending[0..insertAt-1]` + 半截音节 + `pending[insertAt..]`。
      */
     val composingText: String
-        get() = when (stage) {
-            InputStage.INITIAL -> pinyin
-            InputStage.FINAL -> pinyin + (firstKey ?: "")
-            InputStage.SYLLABLE -> pinyin
+        get() = segments().joinToString("") { it.text }
+
+    /** 预编辑区的一段：完整音节，或「半截音节」（只有声母键）。 */
+    private class Segment(
+        val hit: FinalHit?,
+        val text: String,
+        /** 是不是「半截音节」（刚按了声母、韵母还没定）。 */
+        val half: Boolean,
+        /** 它在 [pending] 里的下标（半截音节没有下标，为 -1）。 */
+        val index: Int,
+    )
+
+    /**
+     * 预编辑区按视觉顺序的分段。
+     *
+     * 「半截音节」永远排在插入点上——它就是「正在打的那个音节」。
+     */
+    private fun segments(): List<Segment> {
+        val out = ArrayList<Segment>()
+        for (i in pending.indices) {
+            if (i == insertAt && stage == InputStage.FINAL && firstKey != null) {
+                out += Segment(null, halfText(firstKey!!), true, -1)
+            }
+            out += Segment(pending[i], pending[i].syllable ?: "", false, i)
         }
+        if (stage == InputStage.FINAL && insertAt >= pending.size && firstKey != null) {
+            out += Segment(null, halfText(firstKey!!), true, -1)
+        }
+        return out
+    }
+
+    /**
+     * 半截音节在预编辑区里显示的文字：**声母的拼音**。
+     *
+     * 显示键位字母是不行的——小鹤里 sh 在 `u` 键上，
+     * 屏幕上冒出个 "u" 用户根本看不出那是 "sh"。
+     * （单字母声母两者一样，显示的就是那个字母。）
+     */
+    private fun halfText(key: String): String =
+        engine.scheme.initialByKey[key] ?: key
+
+    /**
+     * 插入点（下一个音节该插的地方）在预编辑区里的字符偏移。
+     *
+     * 光标就跟着它走——输入框里看到的插入位置，永远是会话里真正的插入位置。
+     */
+    private fun insertionOffset(): Int {
+        var acc = 0
+        val n = insertAt.coerceIn(0, pending.size)
+        for (i in 0 until n) acc += pending[i].syllable?.length ?: 0
+        // 半截音节就在插入点上，它本身也占位置
+        if (stage == InputStage.FINAL) acc += (firstKey ?: "").length
+        return acc
+    }
 
     /** 当前串的默认首字串，用于整句上屏。 */
     val previewChars: String
-        get() = pending.joinToString("") { engine.candidateChars(it.syllable ?: "").take(1) }
+        get() = pending.joinToString("") {
+            engine.candidateCharList(it.syllable ?: "").firstOrNull().orEmpty()
+        }
 
     /** 当前串命中的词（最高频）。 */
     val phrase: String? get() = engine.phraseFor(pinyin)
@@ -723,6 +942,7 @@ class InputSession(private val engine: PinyinEngine) {
                 firstKey = key
                 finals = resolved
                 stage = InputStage.FINAL
+                caret = insertionOffset()
                 return true
             }
 
@@ -735,6 +955,7 @@ class InputSession(private val engine: PinyinEngine) {
                 firstKey = key
                 finals = resolved
                 stage = InputStage.FINAL
+                caret = insertionOffset()
                 return true
             }
         }
@@ -743,9 +964,183 @@ class InputSession(private val engine: PinyinEngine) {
     /** 在韵母位选定一个第二键。 */
     fun chooseFinal(key: String): Boolean {
         val hit = finals[key] ?: return false
-        pending += hit
+        // 插在插入点上——光标在中间时，新音节就插在那个位置
+        pending.add(insertAt, hit)
+        insertAt++
         stage = InputStage.SYLLABLE
+        caret = insertionOffset()
         return true
+    }
+
+    /**
+     * **把光标挪到预编辑区的第 [offset] 个字符处。**
+     *
+     * 挪完之后，接着按的键会**插在光标处**——
+     * 这就是「拼音打错了，点一下就能改」的实现。
+     *
+     * 光标落在「半截音节」前面时，那半截音节作废（它只占了一个键，
+     * 而半截音节只能待在插入点上，没法留在别处）。
+     *
+     * @return 有没有真的挪动
+     */
+    fun setCaret(offset: Int): Boolean {
+        val text = composingText
+        val clamped = offset.coerceIn(0, text.length)
+        var acc = 0
+        var pendingIdx = 0
+        for (s in segments()) {
+            if (s.half) {
+                if (clamped <= acc) {
+                    // 光标在半截音节前面 → 它作废（半截音节只能待在插入点上）
+                    firstKey = null
+                    finals = emptyMap()
+                    stage = if (pending.isNotEmpty()) InputStage.SYLLABLE else InputStage.INITIAL
+                }
+                // 光标在半截音节后面 → 保留它（下一个键补全它）
+                insertAt = pendingIdx
+                caret = clamped
+                return true
+            }
+            val segStart = acc
+            acc += s.text.length
+            pendingIdx++
+            if (clamped <= segStart) {
+                // 光标在这个音节的开头 → 插在它**前面**
+                insertAt = pendingIdx - 1
+                caret = clamped
+                return true
+            }
+            if (clamped <= acc) {
+                // 光标在这个音节的里面或末尾 → 插在它**后面**
+                insertAt = pendingIdx
+                caret = clamped
+                return true
+            }
+        }
+        insertAt = pendingIdx
+        caret = clamped
+        return true
+    }
+
+    /**
+     * **删掉光标前面那个字。**
+     *
+     * 光标在末尾时，删的是最后一个音节的最后一个字母；
+     * 光标在中间时，删的是那一处的字母。
+     *
+     * 截短之后那个音节可能：
+     * - **正好只剩声母**（"ri" → "r"）→ 退回「半截音节」，
+     *   用户接着按韵母键就能补上（按 "f" 就是 "ren"）
+     * - **还是个体面的音节**（"xian" → "xia"）→ 换成它
+     * - **不成立了**（"xian" → "xin"）→ 退而求其次只留光标前面那截，
+     *   再不济就把整个音节删掉
+     */
+    fun deleteBeforeCaret(): Boolean {
+        if (caret <= 0) return false
+        var acc = 0
+        for (s in segments()) {
+            if (caret - 1 < acc + s.text.length) {
+                val k = (caret - 1) - acc    // 分段内的下标
+                return if (s.half) {
+                    // 半截音节：整个删掉
+                    firstKey = null
+                    finals = emptyMap()
+                    stage = if (pending.isNotEmpty()) InputStage.SYLLABLE else InputStage.INITIAL
+                    caret = acc
+                    true
+                } else {
+                    deleteInSyllable(s.hit!!, k, s.index, acc)
+                }
+            }
+            acc += s.text.length
+        }
+        return false
+    }
+
+    /**
+     * 删掉某个音节里的一个字。
+     *
+     * @param hit   要改的音节
+     * @param k     删掉的是它里面的第几个字
+     * @param index 它在 pending 里的下标
+     * @param segStart 它在预编辑区里的起始偏移
+     */
+    private fun deleteInSyllable(hit: FinalHit, k: Int, index: Int, segStart: Int): Boolean {
+        val orig = hit.syllable ?: ""
+        // 删掉第 k 个字
+        val cut = orig.substring(0, k) + orig.substring(k + 1)
+
+        // ① 截短之后正好只剩声母 → 退回「半截音节」，用户接着按韵母键就能补上
+        val initKey = hit.initialKey
+        if (cut.isNotEmpty() && cut == hit.initialPinyin && initKey != null) {
+            pending.removeAt(index)
+            insertAt = index
+            firstKey = initKey
+            finals = engine.resolveFinals(initKey)
+            stage = InputStage.FINAL
+            caret = segStart + k
+            return true
+        }
+
+        // ② 截短之后还是个体面的音节 → 换成它
+        val newHit = syllableOf(cut)
+        if (newHit != null) {
+            pending[index] = newHit
+            caret = segStart + k
+            return true
+        }
+
+        // ③ 不成立了 → 只留光标前面那截
+        val prefix = orig.substring(0, k)
+        val prefixHit = syllableOf(prefix)
+        if (prefixHit != null) {
+            pending[index] = prefixHit
+            caret = segStart + k
+            return true
+        }
+        // ④ 前半截正好只剩声母 → 退回半截音节（用户接着按韵母键就能补上）
+        val prefixKey = hit.initialKey
+        if (prefix.isNotEmpty() && prefix == hit.initialPinyin && prefixKey != null) {
+            pending.removeAt(index)
+            insertAt = index
+            firstKey = prefixKey
+            finals = engine.resolveFinals(prefixKey)
+            stage = InputStage.FINAL
+            caret = segStart
+            return true
+        }
+
+        // ⑤ 整个音节删掉
+        pending.removeAt(index)
+        if (insertAt > index) insertAt--
+        caret = segStart
+        return true
+    }
+
+    /**
+     * 把一段拼音换算成音节；换算不出来（或者换算出来不是它）就 null。
+     *
+     * 「换算出来不是它」这一条很重要：拼音串被截短之后，
+     * 同一个键位编码可能对应另一个音节——那就不是用户想要的那个。
+     */
+    private fun syllableOf(pinyin: String): FinalHit? {
+        if (pinyin.isEmpty()) return null
+        // 零声母的音节（a/ai/an/ang/ao/e/ei/en/eng/er/o/ou）走零声母表
+        engine.scheme.zeroInitialCodes[pinyin]?.let { code ->
+            val hit = hitOf(code, pinyin)
+            if (hit != null) return hit
+        }
+        val code = engine.encode(pinyin)
+        if (code.length != 2) return null
+        return hitOf(code, pinyin)
+    }
+
+    /** 两键编码 → 音节；解出来的音节跟 [expect] 不是同一个就当失败。 */
+    private fun hitOf(code: String, expect: String): FinalHit? {
+        if (code.length != 2) return null
+        val hit = engine.resolveFinals(code.substring(0, 1))[code.substring(1, 2)] ?: return null
+        if (hit.syllable != expect) return null
+        return hit
     }
 
     /** 空格上屏：返回要上屏的文本，并清空本轮输入。 */
@@ -768,7 +1163,7 @@ class InputSession(private val engine: PinyinEngine) {
     /** 选定一个字上屏：前面的音节用默认首字，最后一个音节用选中的字。 */
     fun commitChar(ch: String): String {
         val base = pending.dropLast(1).joinToString("") {
-            engine.candidateChars(it.syllable ?: "").take(1)
+            engine.candidateCharList(it.syllable ?: "").firstOrNull().orEmpty()
         }
         val text = base + ch
         committed += text
@@ -788,7 +1183,9 @@ class InputSession(private val engine: PinyinEngine) {
         when (stage) {
             InputStage.SYLLABLE -> {
                 pending.removeLastOrNull()
+                if (insertAt > pending.size) insertAt = pending.size
                 stage = InputStage.FINAL
+                caret = insertionOffset()
                 return true
             }
 
@@ -796,6 +1193,7 @@ class InputSession(private val engine: PinyinEngine) {
                 stage = InputStage.INITIAL
                 firstKey = null
                 finals = emptyMap()
+                caret = insertionOffset()
                 return true
             }
 
@@ -804,6 +1202,8 @@ class InputSession(private val engine: PinyinEngine) {
                 // 而不是直接去动宿主应用里的已上屏文本——否则会话和宿主会脱节。
                 if (pending.isNotEmpty()) {
                     pending.removeLastOrNull()
+                    if (insertAt > pending.size) insertAt = pending.size
+                    caret = insertionOffset()
                     return true
                 }
                 if (committed.isEmpty()) return false
@@ -840,18 +1240,23 @@ class InputSession(private val engine: PinyinEngine) {
             firstKey = null
             finals = emptyMap()
             stage = if (pending.isNotEmpty()) InputStage.SYLLABLE else InputStage.INITIAL
+            caret = insertionOffset()
             removal
         }
 
         InputStage.SYLLABLE -> {
             val hit = pending.removeLastOrNull() ?: return null
+            if (insertAt > pending.size) insertAt = pending.size
             if (pending.isEmpty()) stage = InputStage.INITIAL
+            caret = insertionOffset()
             SwipeRemoval(syllable = hit)
         }
 
         InputStage.INITIAL -> {
             // 理论上 INITIAL 时没有已完成的音节，但退格可能把状态留在这儿
             val hit = pending.removeLastOrNull() ?: return null
+            if (insertAt > pending.size) insertAt = pending.size
+            caret = insertionOffset()
             SwipeRemoval(syllable = hit)
         }
     }
@@ -862,12 +1267,15 @@ class InputSession(private val engine: PinyinEngine) {
     fun undoSwipe(removal: SwipeRemoval) {
         removal.syllable?.let {
             pending.add(it)
+            if (insertAt > pending.size) insertAt = pending.size
             stage = InputStage.SYLLABLE
+            caret = insertionOffset()
         }
         removal.partialFirstKey?.let {
             firstKey = it
             finals = removal.partialFinals
             stage = InputStage.FINAL
+            caret = insertionOffset()
         }
     }
 
@@ -876,5 +1284,7 @@ class InputSession(private val engine: PinyinEngine) {
         stage = InputStage.INITIAL
         firstKey = null
         finals = emptyMap()
+        insertAt = 0
+        caret = 0
     }
 }

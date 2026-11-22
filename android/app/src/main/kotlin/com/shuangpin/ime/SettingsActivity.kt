@@ -22,10 +22,12 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import com.shuangpin.engine.AsrProtocol
+import com.shuangpin.engine.FileUserDict
 import com.shuangpin.engine.LexemeClient
 import com.shuangpin.engine.LexemeRequest
 import com.shuangpin.ime.voice.AsrConfig
 import com.shuangpin.ime.voice.HttpAsrEngine
+import java.io.File
 
 /**
  * 输入法设置。
@@ -103,6 +105,8 @@ class SettingsActivity : Activity() {
         root.addView(divider())
 
         buildLayoutSection(root)
+        root.addView(divider())
+        buildUserDictSection(root)
         root.addView(divider())
         buildCloudSection(root)
         root.addView(divider())
@@ -256,6 +260,82 @@ class SettingsActivity : Activity() {
             }
         }
         root.addView(group)
+
+        root.addView(sectionTitle("韵母位排法"))
+        root.addView(
+            hint(
+                "「固定小鹤」= 每个韵母永远在它那个键上（ao 在 c、ian 在 m、uang 在 l），\n" +
+                    "换声母也不用重新认位置。\n" +
+                    "「拇指优先」= 单手时把韵母聚到拇指那边，够得着，\n" +
+                    "但每换一个声母键位就换一套。"
+            )
+        )
+        val finalGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        val finalOptions = listOf(
+            "固定小鹤（推荐）" to ImeSettings.FINAL_ARRANGE_FIXED,
+            "拇指优先" to ImeSettings.FINAL_ARRANGE_THUMB,
+        )
+        val currentFinal = settings.finalArrange
+        for ((label, value) in finalOptions) {
+            val rb = RadioButton(this).apply { text = label }
+            finalGroup.addView(rb)
+            // 先定选中状态再挂监听——反过来的话初始化就会误触发一次
+            rb.isChecked = value == currentFinal
+            rb.setOnCheckedChangeListener { _, checked ->
+                if (checked) settings.finalArrange = value
+            }
+        }
+        root.addView(finalGroup)
+    }
+
+    /**
+     * 自学习词库：看看学了多少，想的话可以清空。
+     *
+     * 词条**只存在本机**（应用私有目录），不上传、不联网。
+     */
+    private fun buildUserDictSection(root: LinearLayout) {
+        root.addView(sectionTitle("自学习词库"))
+        root.addView(
+            hint(
+                "你打过的词会记在这台设备上——词库里根本没有的也行（比如「炼气士」），\n" +
+                    "下次打同样的拼音，它就排在候选栏第一位。"
+            )
+        )
+        val count = userDictEntryCount()
+        root.addView(
+            TextView(this).apply {
+                text = if (count > 0) "当前已学 $count 个词" else "还没有学到词"
+                textSize = 14f
+                setTextColor(Color.parseColor("#5B6472"))
+                setPadding(0, dp(6), 0, dp(4))
+            }
+        )
+        root.addView(
+            Button(this).apply {
+                text = "清空已学词条"
+                isEnabled = count > 0
+                setOnClickListener {
+                    try {
+                        userDictFile().delete()
+                    } catch (ignored: Throwable) {
+                        // 删不掉就算了，下一次启动时它会被空库覆盖
+                    }
+                    Toast.makeText(this@SettingsActivity, "已清空", Toast.LENGTH_SHORT).show()
+                    // 重画这一屏，条数立刻归零
+                    setContentView(buildUi())
+                }
+            }
+        )
+    }
+
+    /** 用户词库文件。跟输入法服务用的是同一个路径。 */
+    private fun userDictFile(): File = File(filesDir, ImeSettings.USER_DICT_FILE)
+
+    /** 已学的词条数。文件很小，读一下不费劲。 */
+    private fun userDictEntryCount(): Int = try {
+        FileUserDict(userDictFile()).size
+    } catch (ignored: Throwable) {
+        0
     }
 
     /** 云端大模型：联想 / 消歧 / 纠错都用它。 */
@@ -289,21 +369,31 @@ class SettingsActivity : Activity() {
             text = "直连厂商"
             isChecked = settings.llmProtocol == ImeSettings.PROTOCOL_OPENAI
         }
+        val anthropicRadio = RadioButton(this).apply {
+            text = "直连(Anthropic)"
+            isChecked = settings.llmProtocol == ImeSettings.PROTOCOL_ANTHROPIC
+        }
         group.addView(serviceRadio)
         group.addView(openAiRadio)
+        group.addView(anthropicRadio)
         group.setOnCheckedChangeListener { _, id ->
-            settings.llmProtocol = if (id == openAiRadio.id) {
-                ImeSettings.PROTOCOL_OPENAI
-            } else {
-                ImeSettings.PROTOCOL_SERVICE
+            settings.llmProtocol = when (id) {
+                openAiRadio.id -> ImeSettings.PROTOCOL_OPENAI
+                anthropicRadio.id -> ImeSettings.PROTOCOL_ANTHROPIC
+                else -> ImeSettings.PROTOCOL_SERVICE
             }
         }
         root.addView(group)
 
         root.addView(
             hint(
-                "自建服务：填 tools/lexeme_server.mjs 的地址，模型和 key 都在服务端，APP 里不存 key。\n" +
-                    "直连厂商：填 API 地址（OpenAI 兼容），模型名和 key 填下面两栏，key 只存在这台手机上。"
+                "自建服务：填 tools/lexeme_server.mjs 的地址（如 http://192.168.x.x:8787），" +
+                    "模型和 key 都在服务端，APP 里不存 key。\n" +
+                    "直连厂商（OpenAI 兼容）：地址填到 /v1 为止，" +
+                    "如 https://api.minimax.cn/v1（会请求 /v1/chat/completions）。\n" +
+                    "直连厂商（Anthropic 兼容）：地址填到 /anthropic 为止，" +
+                    "如 https://api.minimax.cn/anthropic（会请求 /anthropic/v1/messages）。\n" +
+                    "模型名和 key 填下面两栏，key 只存在这台手机上。"
             )
         )
 
@@ -400,7 +490,7 @@ class SettingsActivity : Activity() {
         val language = textRow(root, "语言", settings.asrLanguage, "zh")
             .also { asrLanguage = it }
 
-        // 换服务商：地址和模型名跟着换成对应的默认��。
+        // 换服务商：地址和模型名跟着换成对应的默认值。
         // 只在「当前值还是空白或某个预设的默认值」时才改——
         // 用户自己填的地址不能被覆盖掉。
         group.setOnCheckedChangeListener { _, id ->
@@ -567,7 +657,7 @@ class SettingsActivity : Activity() {
                 error = t.message ?: t.javaClass.simpleName
             }
             val msg = when {
-                error != null -> "连不上：$error"
+                error != null -> "连不上：$error" + hintForError(error)
                 result.isNullOrEmpty() -> "连上了，但没返回内容"
                 else -> "连上了：${result!!.joinToString(" / ")}"
             }
@@ -575,6 +665,25 @@ class SettingsActivity : Activity() {
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             }
         }, "settings-test").apply { isDaemon = true }.start()
+    }
+
+    /**
+     * 把常见错误翻译成人话。
+     *
+     * 光甩一个「HTTP 401」用户根本不知道该改哪儿——
+     * 这几个码对应的都是「设置填错了」，直接告诉他怎么填。
+     */
+    private fun hintForError(error: String): String = when {
+        error.contains("401") || error.contains("403") ->
+            "\n（key 没填、填错了，或者没权限。直连厂商**必须**填 key）"
+        error.contains("404") ->
+            "\n（地址路径不对：OpenAI 兼容填到 /v1（如 https://api.minimax.cn/v1），" +
+                "Anthropic 兼容填到 /anthropic（如 https://api.minimax.cn/anthropic））"
+        error.contains("timeout") || error.contains("timed out") || error.contains("UnknownHost") ->
+            "\n（地址或网络不通：检查地址、Wi-Fi；自建服务要确认那台电脑上的 node 还在跑）"
+        error.contains("429") ->
+            "\n（模型额度用完了：等恢复、充值，或换后端）"
+        else -> ""
     }
 
     private fun requestMic() {

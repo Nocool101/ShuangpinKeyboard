@@ -25,7 +25,7 @@ class SwipeDeleteTest {
         @BeforeClass
         @JvmStatic
         fun load() {
-            engine = DataLoader().load().engine("xiaohe")
+            engine = TestData.engine()
         }
     }
 
