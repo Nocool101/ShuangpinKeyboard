@@ -8,8 +8,6 @@ Android 上的双拼输入法，小鹤、自然码两套方案。
 
 ![候选栏：每个字上方标拼音角标](bug/候选栏.jpg)
 
-工程进度、已知问题、调试笔记在 [PROGRESS.md](PROGRESS.md)。
-
 ---
 
 ## 键盘
@@ -369,12 +367,6 @@ JVM 基线（`DictionaryLoadBenchmark` 自动测，本机实测），安卓 ART 
 加载策略是核心数据主线程同步（键盘立刻可用），词库后台线程加载完整体替换。
 
 ---
-
-## 其他文档
-
-- [PROGRESS.md](PROGRESS.md) —— 开发进度、决策记录、真机调试笔记（30 条坑）
-- [NOTICE](NOTICE) —— 第三方组件的出处与许可义务
-- [HANDOVER.md](HANDOVER.md) —— 交接文档：当前状态快照、踩坑清单、命令速查
 
 ---
 
