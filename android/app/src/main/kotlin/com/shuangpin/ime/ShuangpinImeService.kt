@@ -115,6 +115,26 @@ class ShuangpinImeService : InputMethodService() {
      */
     private var lastCandidatePinyin: String? = null
 
+    /**
+     * **纠错候选要不要过端侧重排**：默认**关**。
+     *
+     * 实测（引擎层 `TyposRerankEvalTest`，真实词库 + 真实模型）：
+     * - **主通道**（同一拼音的多个读法）：引擎首选 76.3% → 模型 81.0%，**+4.7pp**
+     * - **纠错通道**（分属不同拼音的纠错候选）：词频第一 71.3% → 模型 46.8%，**-24.5pp**
+     *   带上文也救不回来（47/55 → 42/55）
+     *
+     * 原因：重排模型是**字级 LM**，它算的是「这些字连起来的概率」。
+     * 它擅长的是「同一个拼音的多个读法里选哪个」（主通道）；
+     * 而纠错候选**分属不同的拼音**，它那个「字面概率」就成了一个
+     * 比词频更差的相关性估计——「很经典」的字比「防静电」的字常见，
+     * 空上文时它就按这个排，于是把对的弄坏了。
+     *
+     * 所以：**代码留着**（多通道控制器 + 位置保持的应用逻辑都测过），
+     * 但**默认不启用**。哪天有了「用户真实错打 + 真实意图」的样本，
+     * 拿那个评测集重测一遍再决定开不开。
+     */
+    private val correctionRerankEnabled = false
+
     /** 端侧重排：后台线程算，结果到了再更新候选栏。 */
     private val reranker = RerankController(this)
 
@@ -181,6 +201,21 @@ class ShuangpinImeService : InputMethodService() {
 
     /** 上一次请求重排的键（拼音串 + 候选集合）。同一批候选不重复请求。 */
     private var lastRerankKey: String? = null
+
+    /**
+     * 模型给出的**纠错候选**顺序（新的在前）。
+     *
+     * 和 [rerankedOrder] 是**两条独立的通道**：
+     * 主通道排的是「同一串拼音的候选」，纠错通道排的是「纠错出来的那些词」。
+     * 两者互不覆盖——纠错通道换代号不会把主通道算好的结果作废，反过来也一样。
+     */
+    private var rerankedCorrectionOrder: List<String> = emptyList()
+
+    /** 这个纠错顺序对应的是哪一轮输入的拼音串（对不上就作废）。 */
+    private var rerankedCorrectionPinyin: String? = null
+
+    /** 上一次请求纠错重排的键。同一批纠错候选不重复请求。 */
+    private var lastCorrectionRerankKey: String? = null
 
     /**
      * 候选栏的第一个候选——**空格键会上屏的就是它**。
@@ -1075,7 +1110,10 @@ class ShuangpinImeService : InputMethodService() {
         val items = Candidates.build(engine, session, includeCorrections = true)
         val ordered = applyRerank(items)
         val boosted = applyCloudBoost(ordered)
-        val withNext = insertNextWords(boosted)
+        // 纠错候选之间的重排放在最后：它只动纠错候选彼此的次序，
+        // 但要**盖过**前面的所有排序（云端提升也会重排 kept 那组）。
+        val withCorrRerank = applyCorrectionRerank(boosted)
+        val withNext = insertNextWords(withCorrRerank)
         val withCorrection = insertCorrection(withNext)
         // 逐字修改的结果最后套上——重排、联想、纠错都不该把它冲掉
         val finalItems = applyCharEdit(withCorrection)
@@ -1212,11 +1250,78 @@ class ShuangpinImeService : InputMethodService() {
     }
 
     /**
+     * 把模型重排的**纠错候选**顺序套上去。
+     *
+     * 只动**纠错候选之间**的次序——它们在候选栏里的位置（第几格）不变。
+     * 置顶的纠错候选还是置顶，只是几个纠错候选之间换了顺序。
+     *
+     * 为什么值得排：纠错候选的初始顺序是**词频**
+     * （「只会」79 分 >「智慧」76 分 >「指挥」73 分）。
+     * 词频只能分高低，分不出「用户此刻想要哪个」——那要看上文。
+     * 「班」后面接的是「指挥」，不是「只会」。
+     */
+    private fun applyCorrectionRerank(items: List<Candidate>): List<Candidate> {
+        val order = rerankedCorrectionOrder
+        if (order.isEmpty() || rerankedCorrectionPinyin != session.pinyin) return items
+        val corr = items.filter { it.kind == CandidateKind.CORRECTION }
+        if (corr.size < 2) return items
+        val rank = HashMap<String, Int>()
+        order.forEachIndexed { i, text -> rank[text] = i }
+        // sortedBy 是稳定排序：模型没提到的纠错候选留在后面，彼此顺序不变
+        val sorted = corr.sortedBy { rank[it.text] ?: Int.MAX_VALUE }
+        // 原地替换：位置不变，只换内容
+        val out = ArrayList<Candidate>(items.size)
+        var i = 0
+        for (item in items) {
+            if (item.kind == CandidateKind.CORRECTION) out += sorted[i++] else out += item
+        }
+        return out
+    }
+
+    /**
+     * 请求**纠错候选**的重排。
+     *
+     * 纠错候选之间是**等长**的（字数 == 音节数），正好满足重排模型「候选等长」的要求。
+     * 模型看的是「哪个词更接上文」——这正是词频给不了的信息。
+     *
+     * **独立通道**：不跟主通道混在一起。
+     * 纠错候选的拼音跟用户实际敲的键对不上，混进主池子等于让模型
+     * 在两批语义不同的候选之间比，那是「苹果和梨」。
+     */
+    private fun requestCorrectionRerank(items: List<Candidate>) {
+        if (!correctionRerankEnabled) return
+        if (!reranker.ready) return
+        val corr = items.filter { it.kind == CandidateKind.CORRECTION }
+        if (corr.size < 2) return
+        val ctx = rerankContext()
+        // **没上文就别问模型**：它这时候只能按字面概率瞎排，比词频还差（实测 -24.5pp）
+        if (ctx.isBlank()) return
+        val key = session.pinyin + "|C|" + corr.joinToString("|") { it.text }
+        if (key == lastCorrectionRerankKey) return
+        lastCorrectionRerankKey = key
+
+        val pinyin = session.pinyin
+        val t = reranker.newToken(RerankController.CORRECTION_CHANNEL)
+        reranker.request(RerankController.CORRECTION_CHANNEL, ctx, corr.map { it.text }, t) { ranked ->
+            mainHandler.post {
+                rerankedCorrectionOrder = ranked
+                rerankedCorrectionPinyin = pinyin
+                renderCandidates()
+            }
+        }
+    }
+
+    /**
      * 请求模型重排。
      *
      * 同一批候选不重复请求——否则「重排 → 刷新 → 又触发重排」会绕圈。
      */
     private fun requestRerank(items: List<Candidate>) {
+        // 纠错候选走**自己的通道**（跟主通道互不干扰）。
+        // 放在前面：主通道可能因为「候选不足两个」直接返回，
+        // 那时纠错通道照样该跑——它们要的东西不一样。
+        requestCorrectionRerank(items)
+
         // 纠错候选不进重排池（原因见 applyRerank）
         // 用户自学习词、整串精确命中也不进：模型没见过它们，排名没有意义
         val pool = items.filter { !isCorrectionKind(it.kind) && it.kind != CandidateKind.USER && !it.exact }

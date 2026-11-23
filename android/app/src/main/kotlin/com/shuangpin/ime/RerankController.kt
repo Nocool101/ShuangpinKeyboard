@@ -38,15 +38,30 @@ class RerankController(
 
     private val counter = AtomicInteger(0)
 
+    /**
+     * 各通道的当前代号。
+     *
+     * **分通道是必须的**：主通道（普通候选重排）和纠错通道各跑各的，
+     * 两次请求互相独立——纠错通道换代号**不能**把主通道已经算好的结果作废，
+     * 反过来也一样。
+     *
+     * 用一张表存，而不是一个字段。
+     */
+    private val tokens = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     /** 当前这次请求的代号；每次开始新的一轮输入就换掉。 */
     @Volatile
     var token: Long = 0
         private set
 
     /** 换一个代号：开始新的一轮输入，之前算完的结果全部作废。 */
-    fun newToken(): Long {
+    fun newToken(): Long = newToken(MAIN_CHANNEL)
+
+    /** 换一个代号（指定通道）。只作废**这个通道**的旧结果。 */
+    fun newToken(channel: String): Long {
         val t = counter.incrementAndGet().toLong()
-        token = t
+        tokens[channel] = t
+        if (channel == MAIN_CHANNEL) token = t
         return t
     }
 
@@ -94,6 +109,19 @@ class RerankController(
         candidates: List<String>,
         requestToken: Long,
         onDone: (List<String>) -> Unit,
+    ) = request(MAIN_CHANNEL, context, candidates, requestToken, onDone)
+
+    /**
+     * 请求重排（指定通道）。
+     *
+     * @param channel 通道名；同一个通道的旧请求会被新请求作废，不同通道互不影响
+     */
+    fun request(
+        channel: String,
+        context: String,
+        candidates: List<String>,
+        requestToken: Long,
+        onDone: (List<String>) -> Unit,
     ) {
         val r = reranker ?: return
         if (candidates.size < 2) return
@@ -102,9 +130,9 @@ class RerankController(
                 val t0 = System.nanoTime()
                 val ranked = r.rank(context, candidates)
                 val us = (System.nanoTime() - t0) / 1000
-                android.util.Log.d(TAG, "重排 $us us / ${candidates.size} 个等长候选")
-                diagnostic(appContext, "重排 $us us / ${candidates.size} 个等长候选", null)
-                if (requestToken == token) onDone(ranked)
+                android.util.Log.d(TAG, "重排[$channel] $us us / ${candidates.size} 个等长候选")
+                diagnostic(appContext, "重排[$channel] $us us / ${candidates.size} 个等长候选", null)
+                if (requestToken == tokens[channel]) onDone(ranked)
             } catch (t: Throwable) {
                 // 推理失败就当没重排
                 android.util.Log.w(TAG, "重排失败", t)
@@ -115,6 +143,12 @@ class RerankController(
 
     companion object {
         private const val TAG = "ShuangpinRerank"
+
+        /** 主通道：普通候选（同输入的等长候选）重排。 */
+        const val MAIN_CHANNEL = "main"
+
+        /** 纠错通道：纠错候选之间重排。 */
+        const val CORRECTION_CHANNEL = "correction"
 
         /**
          * 诊断记录写到 App 私有目录。
