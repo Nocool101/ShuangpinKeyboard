@@ -239,7 +239,8 @@ class SettingsActivity : Activity() {
         root.addView(sectionTitle("键盘布局"))
         root.addView(
             hint(
-                "单手模式把字母区收窄到拇指那一侧，候选栏跟着收窄。\n" +
+                "单手模式把整块键盘收窄到拇指那一侧（每个键比全键盘小 1/3），" +
+                    "候选栏也挪到同一侧。\n" +
                     "字母的相对位置不变——双拼的位置记忆不受影响。改完下次弹键盘生效。"
             )
         )

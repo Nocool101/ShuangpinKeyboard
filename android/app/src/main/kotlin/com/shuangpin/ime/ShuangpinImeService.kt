@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
 import android.view.Gravity
@@ -23,12 +24,15 @@ import com.shuangpin.engine.ActionKind
 import com.shuangpin.engine.Candidate
 import com.shuangpin.engine.CandidateKind
 import com.shuangpin.engine.Candidates
+import com.shuangpin.engine.CursorMove
 import com.shuangpin.engine.DataLoader
 import com.shuangpin.engine.FileUserDict
 import com.shuangpin.engine.InputSession
 import com.shuangpin.engine.InputStage
+import com.shuangpin.engine.InputSnapshot
 import com.shuangpin.engine.LexemeRequest
 import com.shuangpin.engine.NextWords
+import com.shuangpin.engine.PanelPick
 import com.shuangpin.engine.PinyinEngine
 import com.shuangpin.engine.SwipeRemoval
 import com.shuangpin.ime.voice.AsrConfig
@@ -200,6 +204,16 @@ class ShuangpinImeService : InputMethodService() {
      * 选了之后，空格直接上屏选中的那条。
      */
     private var selectedIndex: Int = -1
+
+    /**
+     * 上一次**自己**挪拼音光标的时刻（`SystemClock.uptimeMillis()`）。
+     *
+     * 挪完要把宿主的光标摆过去（`setSelection`），宿主会把这个动作回报回来。
+     * 有的宿主回报的位置不准（WebView 型输入框一律报末尾），
+     * 照着它改会话里的光标就白挪了。
+     * 这段时间内宿主的回报一律不信。
+     */
+    private var lastCaretSetAt: Long = 0L
 
     /** chip 的视图引用，画选中态用。 */
     private val chipHolders = mutableListOf<ChipHolder>()
@@ -380,7 +394,7 @@ class ShuangpinImeService : InputMethodService() {
         }
         // 留白区那一侧加内边距，候选栏就缩到跟键盘同一侧了
         val dead = (resources.displayMetrics.widthPixels *
-            (1f - ShuangpinKeyboardView.ONE_HAND_WIDTH_RATIO)).toInt()
+            (1f - CANDIDATE_WIDTH_RATIO)).toInt()
         if (l == ShuangpinKeyboardView.Layout.RIGHT) {
             row.setPadding(dead, 0, 0, 0)
         } else {
@@ -436,6 +450,21 @@ class ShuangpinImeService : InputMethodService() {
         }
         candidateIndicator = indicator
 
+        // 「光标在哪」的小标签：挪拼音光标的时候显示（光标在末尾就不显示）。
+        // 不少宿主不认 IME 挪预编辑区的光标（实测 Via 的 WebView 搜索框），
+        // 光标位置得由输入法自己画出来，用户才知道那一滑挪到哪儿了。
+        val caretView = TextView(this).apply {
+            textSize = 15f
+            setTextColor(0xFF171B23.toInt())
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8f).toInt(), 0, dp(8f).toInt(), 0)
+            // 淡蓝底：一眼看出「这是输入法自己画的光标位置」，
+            // 跟候选（白底）区分开，免得跟宿主输入框里那个光标搞混。
+            setBackgroundColor(0xFFE8F0FE.toInt())
+            visibility = View.GONE
+        }
+        caretIndicator = caretView
+
         // 滚动时实时更新页码；手指抬起后吸附到整页。
         scroll.setOnScrollChangeListener { _, _, _, _, _ -> updatePageInfo() }
         scroll.setOnTouchListener { _, event ->
@@ -448,6 +477,14 @@ class ShuangpinImeService : InputMethodService() {
         row.addView(
             scroll,
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f),
+        )
+        // 「光标在哪」的小标签夹在横滑区和页码之间（靠右 = 靠拇指）
+        row.addView(
+            caretView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
+            ),
         )
         row.addView(
             indicator,
@@ -495,6 +532,8 @@ class ShuangpinImeService : InputMethodService() {
         // 键盘形态：单手右手 / 单手左手 / 全键盘。
         // 跟候选栏一起收窄到同一侧（applyKeyLayout 里一并做）。
         kb.layout = keyLayout()
+        // 空格键的长按归谁：语音占着的时候不能拿去挪拼音光标。
+        kb.spaceLongPressForVoice = canTalkBySpace()
         applyKeyLayout()
         kb.listener = object : ShuangpinKeyboardView.Listener {
             override fun onPinyinKey(key: String) {
@@ -537,12 +576,28 @@ class ShuangpinImeService : InputMethodService() {
                 swipeUpDelete()
             }
 
+            override fun onSwipeUpDeleteAll() {
+                swipeUpDeleteAll()
+            }
+
             override fun onUndo() {
                 undo()
             }
 
-            override fun onCandidateSwipe(steps: Int) {
-                moveCandidateSelection(steps)
+            override fun onLetterSwipe(steps: Int) {
+                // 正在输入 → 横滑是「选候选」；
+                // 没输入 → 这一滑是「挪宿主文本的光标」。
+                if (session.pending.isNotEmpty() || composing.isNotEmpty()) {
+                    if (steps != 0) moveCandidateSelection(steps)
+                    return
+                }
+                moveHostCursor(steps)
+            }
+
+            override fun onPinyinCaretMove(steps: Int) {
+                // 长按之后的滑动 → 挪**拼音里的光标**
+                // （手指不用离开键盘就能改拼音）。
+                movePinyinCaret(steps)
             }
 
             override fun onModeChanged(mode: ShuangpinKeyboardView.Mode) {
@@ -771,6 +826,10 @@ class ShuangpinImeService : InputMethodService() {
     private fun refresh() {
         val ic = currentInputConnection ?: return
 
+        // 空格键的长按归谁：语音占着的时候不能拿去挪拼音光标（反之可以）。
+        // 状态一变就更新（正在打拼音 → 语音用不上 → 空格键让给光标）。
+        keyboard?.spaceLongPressForVoice = canTalkBySpace()
+
         // 预编辑区显示已输入内容，让用户看到自己打的是什么。
         // 没有预编辑内容时不要反复调 setComposingText("")——那会动宿主的光标，
         // 有些应用会因此出现光标跳动。
@@ -779,6 +838,11 @@ class ShuangpinImeService : InputMethodService() {
         // 用户在拼音中间点出来的光标位置会丢（点拼音改错字全靠它）。
         if (text != lastComposingText) {
             if (text.isNotEmpty()) {
+                // ⚠ 光标参数**只能传 1**。
+                // 这个参数的本意是「光标停在预编辑区的第几个字符」，
+                // 但实测不少宿主（Via 的搜索框就是）不认它——
+                // 传别的值会把预编辑区**写坏**（文字被复制成两段）。
+                // 光标的位置另外用 setSelection 摆（见 restoreCaret）。
                 ic.setComposingText(text, 1)
                 hasComposing = true
             } else if (hasComposing) {
@@ -786,12 +850,14 @@ class ShuangpinImeService : InputMethodService() {
                 hasComposing = false
             }
             lastComposingText = text
-            // setComposingText 会把光标顶到末尾 —— 光标在中间时得放回原位
+            // 少数 App 不认 setComposingText 的光标参数，兜底挪一下
             restoreCaret(ic, text)
         }
         renderCandidates()
         // 选字面板开着时，候选变了要跟着刷（「全部」页显示的就是这批候选）
         if (panelOpen) refreshPanel()
+        // 「光标在哪」的小标签跟着预编辑区走
+        updateCaretIndicator()
         // syncSession 不只是重画：韵母位在「拇指优先」模式下要**重排键位**，
         // 所以阶段变了必须重新 layout。
         keyboard?.syncSession()
@@ -800,18 +866,70 @@ class ShuangpinImeService : InputMethodService() {
     /**
      * 把宿主输入框的光标放回会话里的位置。
      *
-     * `setComposingText` 会把光标顶到预编辑区末尾——
+     * `setComposingText` 之后，宿主的光标多半停在预编辑区末尾——
      * 用户点了拼音中间之后，删个字再改，光标就跑到末尾去了，
      * 看着像「改的地方不对」。这里把它挪回来。
+     *
+     * 挪之前先确认「宿主的光标确实停在预编辑区末尾」：
+     * 光标前面那段文字（`getTextBeforeCursor`）应当是
+     * 「已上屏文字 + 整个预编辑区」，对得上才认——
+     * 对不上说明这个宿主的口径不一样，别拿猜的位置去 `setSelection`
+     * （那会把光标甩到别处，用户反馈「光标乱跳」）。
      */
     private fun restoreCaret(ic: android.view.inputmethod.InputConnection, text: String) {
         val caret = session.caret
-        // 在末尾就不用管（setComposingText 放的就是那儿）
+        if (text.isEmpty()) return
+        // 在末尾不用管（宿主放的就是那儿）
         if (caret >= text.length) return
-        val before = ic.getTextBeforeCursor(CURSOR_QUERY_CHARS, 0) ?: return
-        val start = (before.length - text.length).coerceAtLeast(0)
+        val before = ic.getTextBeforeCursor(CURSOR_QUERY_CHARS, 0)?.toString() ?: return
+        val after = ic.getTextAfterCursor(CURSOR_QUERY_CHARS, 0)?.toString() ?: ""
+        val start = when {
+            before.endsWith(text) -> {
+                // 光标前面那段 = 已上屏文字 + 整个预编辑区 → 起点就是它扣掉预编辑区
+                (before.length - text.length).coerceAtLeast(0)
+            }
+            else -> {
+                // ⚠ **光标落在预编辑区中间**时，「光标前面那段」只是预编辑区的前半截，
+                // `before.endsWith(text)` 会对不上（宿主的光标把预编辑区切开了）。
+                //
+                // 这时用「全文长度 − 预编辑区长度」算起点：
+                // before + after = 宿主文本全文，预编辑区在它**末尾**，
+                // 所以起点 = 全文字数 − 预编辑区字数。
+                val whole = before.length + after.length
+                if (whole >= text.length) {
+                    whole - text.length
+                } else {
+                    // 这个宿主不认 setComposingText 的光标参数（光标没落在预编辑区末尾），
+                    // 问它要预编辑区真正的起点
+                    hostComposingStart(text) ?: return
+                }
+            }
+        }
         val pos = (start + caret).coerceAtLeast(0)
         ic.setSelection(pos, pos)
+    }
+
+    /**
+     * 问宿主要预编辑区在它文本里的真实起点。
+     *
+     * `getExtractedText` 的 `partialStartOffset/partialEndOffset`
+     * 就是预编辑区（composing span）的起止——宿主给得出就用它的，
+     * 给不出（返回 null）就返回 null，调用方另有退路。
+     */
+    private fun hostComposingStart(text: String): Int? {
+        val ic = currentInputConnection ?: return null
+        val extracted = try {
+            ic.getExtractedText(null, 0)
+        } catch (ignored: Throwable) {
+            null
+        } ?: return null
+        val start = extracted.partialStartOffset
+        val end = extracted.partialEndOffset
+        if (start < 0 || end < 0) return null
+        // 长度必须对得上：对不上说明这个「partial」不是预编辑区
+        // （比如宿主把选区也报成 partial），那就别用了
+        if (end - start != text.length) return null
+        return start
     }
 
     /**
@@ -834,16 +952,62 @@ class ShuangpinImeService : InputMethodService() {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, textLength, action)
         val text = session.composingText
         if (text.isEmpty()) return
-        // 预编辑区在宿主文本的末尾（我们总是 setComposingText 在光标处）
-        val start = (textLength - text.length).coerceAtLeast(0)
-        // 光标不在预编辑区里（比如用户选了别处的文字）→ 不理
-        if (newSelStart < start || newSelStart > start + text.length) return
+        // ⚠ **刚自己挪过光标**：宿主会把我们设的选区回报回来，
+        // 有的宿主回报的位置**不准**（比如 WebView 型输入框总是报末尾）——
+        // 照着它改，光标就被拽回末尾，表现为「只能挪一个字，然后就滑不动了」。
+        // 这段时间内宿主的回报一律不信，只重画。
+        if (SystemClock.uptimeMillis() - lastCaretSetAt < CARET_SET_GUARD_MS) {
+            renderCandidates()
+            keyboard?.syncSession()
+            return
+        }
+        // 预编辑区在宿主文本里的起点。
+        // ⚠ 宿主报过来的那个长度，**口径不统一**（见 composingStart），
+        // 算错了光标就落在别的地方 → 退格删掉别的字（用户反馈「前面有文字时，
+        // 光标删除拼音会乱跳」）。
+        val start = composingStart(textLength, text, newSelStart) ?: return
         val offset = newSelStart - start
         if (offset == session.caret) return
         session.setCaret(offset)
         // 只重画，不动预编辑区的内容（内容没变，setComposingText 不用调）
         renderCandidates()
         keyboard?.syncSession()
+    }
+
+    /**
+     * 预编辑区在宿主文本里的**起点**。
+     *
+     * 宿主在 `onUpdateSelection` 里报的那个长度，口径**不统一**（实测）：
+     *
+     * | 口径 | 那个长度是什么 | 预编辑区起点 |
+     * |---|---|---|
+     * | A | 预编辑区**之前**那段文字的长度（实测多数宿主这样） | 就是它 |
+     * | B | 整段文本的长度（AOSP 文档的说法） | 它 - 预编辑区长度 |
+     *
+     * 两种都算成候选：**谁的范围装得下这次的光标位置，就是谁**；
+     * 两个都装得下（只有光标正好在分界上才会这样），
+     * 就用「光标前面的真实文字」再验一次——
+     * 光标前面那段必然是「已上屏文字 + 预编辑区开头的一段」，对得上就认。
+     */
+    private fun composingStart(textLength: Int, text: String, selStart: Int): Int? {
+        val a = textLength                      // 口径 A
+        val b = textLength - text.length        // 口径 B
+        val okA = selStart - a in 0..text.length
+        val okB = selStart - b in 0..text.length
+        if (okA && !okB) return a
+        if (okB && !okA) return b
+        if (!okA && !okB) return null
+        // 两个都装得下 → 问宿主要「光标前面的文字」来分辨
+        val before = try {
+            currentInputConnection?.getTextBeforeCursor(CURSOR_QUERY_CHARS, 0)?.toString()
+        } catch (ignored: Throwable) {
+            null
+        } ?: return a
+        // 光标前面那段 = 已上屏文字 + 预编辑区开头的一段
+        val headA = text.substring(0, (selStart - a).coerceIn(0, text.length))
+        if (!before.endsWith(headA)) return b
+        val headB = text.substring(0, (selStart - b).coerceIn(0, text.length))
+        return if (before.endsWith(headB)) b else a
     }
 
     private fun renderCandidates() {
@@ -1109,6 +1273,8 @@ class ShuangpinImeService : InputMethodService() {
         val container: View,
         /** 候选字的 view（逐字版是一个字一个）。 */
         val texts: List<TextView>,
+        /** 每个字上面的拼音角标（逐字版才有）。 */
+        val pinyins: List<TextView>,
         val baseBg: Int,
         val baseTextColor: Int,
     )
@@ -1141,7 +1307,7 @@ class ShuangpinImeService : InputMethodService() {
                 setOnClickListener { commitChip(item) }
             }
             candidateBar?.addView(tv)
-            chipHolders += ChipHolder(item, tv, listOf(tv), bg, color)
+            chipHolders += ChipHolder(item, tv, listOf(tv), emptyList(), bg, color)
             return
         }
 
@@ -1158,6 +1324,7 @@ class ShuangpinImeService : InputMethodService() {
             setOnClickListener { commitChip(item) }
         }
         val charViews = mutableListOf<TextView>()
+        val pinyinViews = mutableListOf<TextView>()
         for ((i, syl) in perChar.withIndex()) {
             // 单元高度要**明确给**：角标和汉字都是 WRAP_CONTENT，
             // 高度一样的话 FrameLayout 里一个 TOP 一个 BOTTOM 会完全重叠——
@@ -1168,25 +1335,27 @@ class ShuangpinImeService : InputMethodService() {
                     dp(42f).toInt(),
                 )
             }
-            unit.addView(
-                TextView(this).apply {
-                    text = syl
-                    textSize = 10f
-                    setTextColor(0xFF8A94A6.toInt())
-                    // 点拼音 = 只改这一个字。角标小，触摸区要留够，
-                    // 不然用户点不准（真机上点一次就上屏了）。
-                    setPadding(dp(3f).toInt(), dp(1f).toInt(), dp(3f).toInt(), dp(1f).toInt())
-                    setOnClickListener {
-                        if (isCharItem) {
-                            // 单字候选：打开**它那个音节**的选字面板，
-                            // 在那儿把这个音节的字一个个挑出来。
-                            val seg = session.pending.indexOfFirst { it.syllable == syl }
-                            openPanelAt(seg.coerceAtLeast(0))
-                        } else {
-                            startEditingSyllable(i, item.text)
-                        }
+            val pinyinView = TextView(this).apply {
+                text = syl
+                textSize = 10f
+                setTextColor(COLOR_PINYIN_BADGE)
+                // 点拼音 = 只改这一个字。角标小，触摸区要留够，
+                // 不然用户点不准（真机上点一次就上屏了）。
+                setPadding(dp(3f).toInt(), dp(1f).toInt(), dp(3f).toInt(), dp(1f).toInt())
+                setOnClickListener {
+                    if (isCharItem) {
+                        // 单字候选：打开**它那个音节**的选字面板，
+                        // 在那儿把这个音节的字一个个挑出来。
+                        val seg = session.pending.indexOfFirst { it.syllable == syl }
+                        openPanelAt(seg.coerceAtLeast(0))
+                    } else {
+                        startEditingSyllable(i, item.text)
                     }
-                },
+                }
+            }
+            pinyinViews += pinyinView
+            unit.addView(
+                pinyinView,
                 FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -1218,7 +1387,7 @@ class ShuangpinImeService : InputMethodService() {
             charViews += charView
         }
         candidateBar?.addView(box)
-        chipHolders += ChipHolder(item, box, charViews, bg, color)
+        chipHolders += ChipHolder(item, box, charViews, pinyinViews, bg, color)
     }
 
     /** 候选文字的颜色。 */
@@ -1336,12 +1505,26 @@ class ShuangpinImeService : InputMethodService() {
         chipHolders.clear()
     }
 
-    /** 把选中态画到 chip 上（没选中的还原成原来的配色）。 */
+    /**
+     * 把选中态画到 chip 上（没选中的还原成原来的配色）。
+     *
+     * **选中 = 品牌蓝实底 + 白字**（用户反馈「滑动选词选中词后颜色太淡，
+     * 用户不容易识别」）。
+     * 以前是一块很淡的浅蓝底 + 深蓝字，混在一排浅色字里几乎看不出选中了谁；
+     * 现在整条候选栏里最重的一块就是它，眼睛一扫就知道「空格会上的就是这条」。
+     */
     private fun applySelectionStyle() {
         chipHolders.forEachIndexed { i, h ->
             val on = i == selectedIndex
-            h.container.setBackgroundColor(if (on) COLOR_SELECTED_BG else h.baseBg)
+            if (on) {
+                h.container.setBackgroundResource(R.drawable.bg_candidate_selected)
+            } else {
+                // 还原成原来的底色（0 = 不要底色）
+                h.container.setBackgroundColor(h.baseBg)
+            }
             h.texts.forEach { it.setTextColor(if (on) COLOR_SELECTED_TEXT else h.baseTextColor) }
+            // 拼音角标也跟着换色——灰字压在蓝底上看不清
+            h.pinyins.forEach { it.setTextColor(if (on) COLOR_SELECTED_PINYIN else COLOR_PINYIN_BADGE) }
         }
     }
 
@@ -1377,6 +1560,137 @@ class ShuangpinImeService : InputMethodService() {
         val item = candidateItems.getOrNull(idx) ?: return false
         commitChip(item)
         return true
+    }
+
+    /**
+     * **长按之后滑动** → 挪**拼音里的光标**。
+     *
+     * 直接滑动是「选候选」；手指先按住不动（长按），这一滑就变成挪光标——
+     * 手指不用离开键盘，就能把光标挪到打错的那个音节上，
+     * 接着按正确的键，新键就**插在光标处**（见 [InputSession.setCaret]）。
+     *
+     * 没在输入拼音的时候，退回「挪宿主文本的光标」——
+     * 跟直接滑动一个样。
+     *
+     * @param steps 位移步数（正 = 往右）：拼音的**字**数
+     */
+    private fun movePinyinCaret(steps: Int) {
+        if (steps == 0) return
+        val text = session.composingText
+        if (text.isEmpty()) {
+            moveHostCursor(steps)
+            return
+        }
+        val from = session.caret
+        val target = CursorMove.horizontal(text, from, steps)
+        if (target == from) return
+        if (!session.setCaret(target)) return
+        Log.d("ShuangpinIME", "拼音光标 $from → $target")
+        // 预编辑区的**内容没变**，所以不用 setComposingText
+        //（调了会把宿主的光标顶到末尾，用户点的位置就丢了；
+        //  带光标位置重发更糟：WebView 型宿主会把预编辑区复制成两段，
+        //  实测 Via 里「nihao」会变成「nihaoao」）。
+        // 宿主的光标尽力摆一下；摆不动也不要紧——
+        // **输入法自己会把光标位置画出来**（见 [caretIndicator]）。
+        lastCaretSetAt = SystemClock.uptimeMillis()
+        currentInputConnection?.let { restoreCaret(it, text) }
+        updateCaretIndicator()
+        renderCandidates()
+        keyboard?.syncSession()
+    }
+
+    /**
+     * **输入法自己显示的「光标在哪」**。
+     *
+     * 为什么要有这个：会话里的插入点挪了 ≠ 宿主输入框里那个**可见的光标**也挪了。
+     * 不少宿主（实测 Via 的搜索框是 WebView）**不认 IME 挪预编辑区光标**——
+     * 宿主把选区一律报成末尾，`setSelection` 也不生效。
+     * 结果就是：功能上确实挪了（接着按的键会插在那一处），
+     * 但用户看着光标还在末尾，**会以为这一滑没生效**
+     * （用户反馈「长按滑动移动拼音光标还是移不动」）。
+     *
+     * 所以候选栏右边固定显示一小段「ni|hao」，光标位置一目了然。
+     */
+    private var caretIndicator: TextView? = null
+
+    /** 更新「光标在哪」那个小标签。 */
+    private fun updateCaretIndicator() {
+        val view = caretIndicator ?: return
+        val text = session.composingText
+        if (text.isEmpty() || session.caret >= text.length) {
+            // 光标在末尾 = 不用提示（宿主自己就显示在那儿）
+            view.visibility = View.GONE
+            view.text = ""
+            return
+        }
+        val caret = session.caret.coerceIn(0, text.length)
+        Log.d("ShuangpinIME", "指示器 text='$text' caret=$caret")
+        // 光标画成一根竖线插在中间（就像文本框里的插入符），
+        // 光标位置那个字也跟着标蓝，一眼能看出「要改的是哪个字」。
+        val shown = text.substring(0, caret) + "|" + text.substring(caret)
+        view.text = android.text.SpannableString(shown).apply {
+            setSpan(
+                android.text.style.ForegroundColorSpan(COLOR_ACCENT_TEXT),
+                caret, caret + 1,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            setSpan(
+                android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                0, shown.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+        }
+        view.visibility = View.VISIBLE
+    }
+
+    /**
+     * 键盘输入区**没有输入时**的滑动 → 挪宿主文本里的光标。
+     *
+     * 「手往哪个方向滑，光标就往哪个方向走」：
+     * 一个字一个字挪（代理对算一个字，emoji 不会被劈开）。
+     *
+     * 光标的计算在引擎层（[CursorMove]）：它是纯文本计算，可以单测。
+     */
+    private fun moveHostCursor(steps: Int) {        val ic = currentInputConnection ?: return
+        if (steps == 0) return
+        val extracted = try {
+            ic.getExtractedText(null, 0)
+        } catch (ignored: Throwable) {
+            null
+        }
+        val text = extracted?.text?.toString()
+        val pos = extracted?.selectionStart ?: -1
+        if (text != null && pos >= 0) {
+            val target = CursorMove.horizontal(text, pos, steps)
+            Log.d("ShuangpinIME", "光标 $pos → $target（挪 $steps 个字）")
+            if (target != pos) ic.setSelection(target, target)
+            return
+        }
+        // 退路：宿主不给全文，就用光标前后的文字拼出来
+        moveHostCursorFallback(ic, steps)
+    }
+
+    /**
+     * 没有全文时的挪光标。
+     *
+     * 光标前面那段 + 后面那段 = 全文（光标正好在中间），
+     * 光标的绝对位置 = 前面那段的长度。
+     *
+     * ⚠ 两段都可能被窗口截断——**前面那段被截断时绝对位置就不可信了**，
+     * 这时候宁可不挪（跳到一个错的位置比不动更糟）。
+     */
+    private fun moveHostCursorFallback(
+        ic: android.view.inputmethod.InputConnection,
+        steps: Int,
+    ) {
+        if (steps == 0) return
+        val before = ic.getTextBeforeCursor(CURSOR_QUERY_CHARS, 0)?.toString() ?: return
+        val after = ic.getTextAfterCursor(CURSOR_QUERY_CHARS, 0)?.toString() ?: return
+        if (before.length >= CURSOR_QUERY_CHARS) return   // 被截断了，位置不可信
+        val text = before + after
+        val pos = before.length
+        val target = CursorMove.horizontal(text, pos, steps)
+        if (target != pos) ic.setSelection(target, target)
     }
 
     // ------------------------------------------------------------------
@@ -1433,10 +1747,12 @@ class ShuangpinImeService : InputMethodService() {
             commitChar(ch)
             return
         }
-        val text = pending.mapIndexed { i, hit ->
-            if (i == index) ch else engine.candidateCharList(hit.syllable ?: "").firstOrNull().orEmpty()
-        }.joinToString("")
-        commitText(text)
+        // 改的是第 index 个音节，别的音节用默认首字（跟选字面板同一套规则）
+        val picked = pending.indices.map { if (it == index) ch else null }
+        val defaults = pending.map { hit ->
+            engine.candidateCharList(hit.syllable ?: "").firstOrNull().orEmpty()
+        }
+        commitText(PanelPick.assemble(picked, defaults))
     }
 
     /** 收起选字面板，回到键盘。 */
@@ -1541,12 +1857,28 @@ class ShuangpinImeService : InputMethodService() {
             refreshPanel()
             return
         }
-        val text = panelPicked.map { it ?: "" }.joinToString("")
+        // **没挑过的音节用默认首字补上**。
+        //
+        // 用户常常只想改最后一个字：点 ⌄ 打开面板 → 点最后一个音节 → 挑一个字。
+        // 前面那些音节他没挑过，但它们**同样要上屏**——
+        // 以前拼的是空串，结果上屏的只有最后那一个字，前面的内容全没了
+        // （用户反馈「只修改最后一个字时，前面的字不会上屏」）。
+        val text = PanelPick.assemble(panelPicked, panelDefaultChars())
         // 学习单位要在 closePanel 之前算——它会把 panelPicked 清空
         val units = panelLearningUnits()
         closePanel()
         if (text.isNotEmpty()) commitText(text, units = units)
     }
+
+    /**
+     * 每个音节的**默认首字**（用户没挑的那个音节就拿它顶上）。
+     *
+     * 跟候选栏里「点某个音节的字，别的音节用默认首字」是同一套规则。
+     */
+    private fun panelDefaultChars(): List<String> =
+        session.pending.map { hit ->
+            engine.candidateCharList(hit.syllable ?: "").firstOrNull().orEmpty()
+        }
 
     /**
      * 面板开着的时候，退格键 = **退回上一个音节**。
@@ -2507,26 +2839,106 @@ class ShuangpinImeService : InputMethodService() {
 
         /** 撤销一次上滑删除：把删掉的音节放回会话 */
         data class RestoreInput(val removal: SwipeRemoval) : UndoOp
+
+        /**
+         * 撤销「上滑停顿删光」：把**整轮输入**放回去。
+         *
+         * 一次删掉的是整轮，不是一格 —— 恢复也得整个恢复。
+         */
+        data class RestoreInputState(val snapshot: InputSnapshot) : UndoOp
     }
 
     /**
-     * 退格键上滑：**一次退一格**，从后往前退。
+     * 退格键上滑：**退一格**。
      *
-     * "nihao" → 退成 "ni" → 退成空 → 再退就是删已上屏的文字。
+     * - **正在输入拼音** → 退掉最后输入的那个**声母/韵母**
+     *   （"xianren" → "xianr"：删掉 "ren" 的韵母，退回半截音节 "r"，
+     *   用户按个韵母键就能改）
+     * - **没在输入**（候选栏没内容） → 退掉已上屏的**一个单元**（一次上屏的那一整块）
      *
      * 为什么不一步删光：用户上滑往往只是想退回一两个音节重打，
-     * 一步全删等于把已经打对的字也丢了。
+     * 一步全删等于把已经打对的字也丢了。要一次删光就用「上滑停顿」。
      */
     private fun swipeUpDelete() {
-        // ① 先退当前这一轮输入（一次一个音节）
+        // ① 先退当前这一轮输入（一次退一个声母/韵母）
         val removal = session.swipeDelete()
         if (removal != null) {
+            Log.d("ShuangpinIME", "上滑退一格：预编辑区 → '${session.composingText}'")
             undoStack.addLast(UndoOp.RestoreInput(removal))
             refresh()
             return
         }
         // ② 没有输入可退了：退掉已上屏的**一个词/句**
+        Log.d("ShuangpinIME", "上滑退一格：退掉已上屏的一个单元")
         deleteLastCommittedUnit()
+    }
+
+    /**
+     * 退格键**上滑后停顿**：把该删的一次删光。
+     *
+     * - **正在输入拼音** → 删掉**所有**已输入的拼音
+     * - **没在输入**（候选栏没内容） → 删掉**光标以前的所有内容**
+     *
+     * 两种都记进撤销栈，下滑能原样恢复 ✓。
+     */
+    private fun swipeUpDeleteAll() {
+        if (session.pending.isNotEmpty() || composing.isNotEmpty()) {
+            // ① 正在输入拼音 → 整轮清空（不动已上屏的文字）
+            val snapshot = session.snapshot()
+            if (snapshot.pending.isEmpty() && snapshot.firstKey == null) return
+            session.clearInput()
+            Log.d("ShuangpinIME", "上滑停顿：删掉全部已输入的拼音")
+            undoStack.addLast(UndoOp.RestoreInputState(snapshot))
+            clearComposing()
+            refresh()
+            return
+        }
+        // ② 没在输入 → 光标以前的内容全删
+        Log.d("ShuangpinIME", "上滑停顿：删掉光标以前的所有内容")
+        deleteAllBeforeCursor()
+    }
+
+    /**
+     * 删掉宿主里**光标以前的所有内容**（可撤销）。
+     *
+     * 以宿主里的真实文字为准：光标前面有什么就删什么，
+     * 不管那些字是不是输入法自己上屏的。
+     */
+    private fun deleteAllBeforeCursor() {
+        val ic = currentInputConnection ?: return
+        val before = hostTextBeforeCursorAll() ?: return
+        if (before.isEmpty()) return
+        ic.deleteSurroundingText(before.length, 0)
+        // 记一笔「插入」，滑下来就能原样恢复
+        undoStack.addLast(UndoOp.Insert(before))
+        // 记账也跟着削
+        trimCommitted(before.length)
+        resetLexeme()
+        refresh()
+    }
+
+    /**
+     * 宿主里光标前面的**全部**文字（不是只有最近那几十个字）。
+     *
+     * `getTextBeforeCursor` 的窗口有限（HOST_LOOKBACK_CHARS 只有 64 个字），
+     * 「全删」要拿的是完整的一段，所以优先用 `getExtractedText`。
+     */
+    private fun hostTextBeforeCursorAll(): String? {
+        val ic = currentInputConnection ?: return null
+        val extracted = try {
+            ic.getExtractedText(null, 0)
+        } catch (ignored: Throwable) {
+            null
+        }
+        if (extracted != null) {
+            val text = extracted.text?.toString() ?: return null
+            val sel = extracted.selectionStart
+            if (sel < 0 || sel > text.length) return null
+            return text.substring(0, sel)
+        }
+        // 退路：退回来的窗口尽量大一些
+        val before = ic.getTextBeforeCursor(CURSOR_QUERY_CHARS, 0)?.toString() ?: return null
+        return before
     }
 
     /**
@@ -2578,22 +2990,6 @@ class ShuangpinImeService : InputMethodService() {
         refresh()
     }
 
-    /** 删掉本会话已上屏的全部文字（可撤销）。 */
-    private fun deleteCommitted() {
-        val ic = currentInputConnection ?: return
-        val deleted = committedText.toString()
-        if (deleted.isEmpty()) return
-        ic.deleteSurroundingText(deleted.length, 0)
-        // 记一笔「插入」，滑下来就能原样恢复
-        undoStack.addLast(UndoOp.Insert(deleted))
-        committedText.clear()
-        committedUnits.clear()
-        session.clear()
-        // 上文没了，联想也就没有依据了
-        resetLexeme()
-        refresh()
-    }
-
     /** 下滑：撤销最近一次操作。 */
     private fun undo() {
         val ic = currentInputConnection ?: return
@@ -2613,6 +3009,11 @@ class ShuangpinImeService : InputMethodService() {
             is UndoOp.RestoreInput -> {
                 // 把上滑删掉的音节放回会话，预编辑区跟着恢复
                 session.undoSwipe(op.removal)
+            }
+
+            is UndoOp.RestoreInputState -> {
+                // 「上滑停顿」删掉的是整轮 → 整个放回去
+                session.restore(op.snapshot)
             }
         }
         refresh()
@@ -2685,6 +3086,23 @@ class ShuangpinImeService : InputMethodService() {
 
         /** 查「光标前面有多少字」时一次问这么多，够用了。 */
         private const val CURSOR_QUERY_CHARS = 4096
+
+        /**
+         * 自己挪完光标之后，**多久之内不信宿主回报的选区**（ms）。
+         *
+         * 250 ms：够覆盖宿主同步回报的来回，又能错开用户「刚挪完马上点一下」的操作。
+         */
+        private const val CARET_SET_GUARD_MS = 250L
+
+        /**
+         * **候选栏**在单手模式下的宽度比例。
+         *
+         * 键盘本体在单手模式下缩到 60%（每个键小 1/3，贴着拇指那一侧摆），
+         * 但候选栏**不跟着缩**：候选栏缩了，一页能看见的候选太少，翻起来更累。
+         *
+         * 候选栏照样贴着键盘那一侧（右/左）——最顺手的候选还是够得着。
+         */
+        private const val CANDIDATE_WIDTH_RATIO = 0.86f
 
         /** 词库落盘的延迟（ms）：连着上屏好几次就攒一次，别每一下都写文件。 */
         private const val USER_DICT_FLUSH_DELAY_MS = 1500L
@@ -2776,15 +3194,27 @@ class ShuangpinImeService : InputMethodService() {
             "，。！？、；：,.!?;:()（）【】《》〈〉“”\"'‘’…—-～~·　 \t\r\n"
 
         /**
-         * 选中候选的底色（蓝）。
+         * 选中候选的**底色**：品牌蓝实底（见 res/drawable/bg_candidate_selected.xml）。
          *
          * 跟第一候选的暖黄底色明显不同——用户一眼能看出
          * 「现在空格会上的，是这条」。
+         *
+         * 以前这里是淡蓝（#DCE6FF），在一排浅色字里几乎看不出选中没选中
+         * （用户反馈「滑动选词选中词后颜色太淡，用户不容易识别」），
+         * 现在改成品牌蓝实底 + 白字，整条候选栏里最重的一块就是它。
          */
-        private const val COLOR_SELECTED_BG = 0xFFDCE6FF.toInt()
 
-        /** 选中候选的字色（深蓝）。 */
-        private const val COLOR_SELECTED_TEXT = 0xFF17458F.toInt()
+        /** 选中候选的字色：白字（压在品牌蓝底上）。 */
+        private const val COLOR_SELECTED_TEXT = 0xFFFFFFFF.toInt()
+
+        /** 选中候选里拼音角标的字色：浅蓝（压在品牌蓝底上，灰字看不清）。 */
+        private const val COLOR_SELECTED_PINYIN = 0xFFD9E4FF.toInt()
+
+        /** 「光标在哪」标签里那一竖线的颜色（品牌蓝）。 */
+        private const val COLOR_ACCENT_TEXT = 0xFF2F6DF6.toInt()
+
+        /** 拼音角标的字色（没选中的时候）。 */
+        private const val COLOR_PINYIN_BADGE = 0xFF8A94A6.toInt()
 
         /**
          * 取多少字的上文交给重排模型。

@@ -244,6 +244,92 @@ class PinyinEditTest {
         s.typeLianQiShi()
         val removal = s.swipeDelete()
         assertTrue(removal != null)
-        assertEquals("xianqi", s.composingText)
+        // 上滑退一格 = 退掉最后一个音节的**韵母**（"shi" → 半截音节 "sh"）
+        assertEquals("xianqish", s.composingText)
+    }
+
+    // ------------------------------------------------------------------
+    // 删字不许「连坐」：删一个字符，最多只能丢它自己
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `删掉声母之后剩下的是韵母`() {
+        // 「wei」= w + ei（小鹤 w-ei 的 ei 在 w 键上）
+        val s = session()
+        s.type("w", "w")
+        assertEquals("wei", s.composingText)
+        // 光标停在 "w" 后面 → 删掉声母
+        s.setCaret(1)
+        assertTrue(s.deleteBeforeCaret())
+        // 「ei」自己就是个音节 → 剩下 "ei"，而不是把整个音节都吃掉
+        assertEquals("ei", s.composingText)
+    }
+
+    @Test
+    fun `删掉韵母的一半会退回半截音节`() {
+        // 「ri」= r + i，删掉 "i" → 只剩声母 "r"，用户接着按 "f" 就是 "ren"
+        val s = session()
+        s.type("r", "i")
+        s.setCaret(2)
+        assertTrue(s.deleteBeforeCaret())
+        assertEquals("r", s.composingText)
+        assertEquals(InputStage.FINAL, s.stage)
+        s.type("f")
+        assertEquals("ren", s.composingText)
+    }
+
+    @Test
+    fun `删掉韵母后光标停在声母后面`() {
+        // 「fu」删掉 "u" → 退回半截音节 "f"
+        // 光标必须停在 **f 的后面**——停在前面的话，下一次退格会越过 f
+        // 直接删到 f 前头那个字上去（用户反馈「删除 u 后光标跑到 f 前面，
+        // 再按删除就会删除 f 前面的 n」）。
+        val s = session()
+        s.type("f", "u")
+        assertEquals("fu", s.composingText)
+        s.setCaret(2)
+        assertTrue(s.deleteBeforeCaret())
+        assertEquals("f", s.composingText)
+        assertEquals(1, s.caret)
+        // 再删一次 → 整个半截音节 "f" 删掉（不是跳过去删 f 前面的字）
+        assertTrue(s.deleteBeforeCaret())
+        assertEquals("", s.composingText)
+    }
+
+    @Test
+    fun `删字之后光标停在删掉的那个位置`() {
+        val s = session()
+        s.typeLianQiShi()
+        // "xian" 里面（"xia" 之后）删一个
+        s.setCaret(3)
+        assertTrue(s.deleteBeforeCaret())
+        // 删的是 "a" → "xin"，光标落在删掉的那个位置（"xi" 之后）
+        assertEquals("xinqishi", s.composingText)
+        assertEquals(2, s.caret)
+    }
+
+    @Test
+    fun `删字之后接着打的字插在光标处`() {
+        val s = session()
+        s.typeLianRiFuWoDing()
+        // 光标点在 "ri" 之后，删掉 "i"，再补一个 "en"
+        s.setCaret(6)
+        assertTrue(s.deleteBeforeCaret())
+        s.type("f")
+        assertEquals("xianrenfuwoding", s.composingText)
+        assertEquals("xianrenfuwoding", s.pinyin)
+    }
+
+    @Test
+    fun `半截音节的偏移按显示出来的文字算`() {
+        // 「sh」在小鹤是 u 键 → 预编辑区显示 "sh"（两个字符），不是 "u"
+        val s = session()
+        s.type("u")
+        assertEquals("sh", s.composingText)
+        assertEquals(2, s.caret)
+        // 接着补一个韵母键 → "shi"
+        s.type("i")
+        assertEquals("shi", s.composingText)
+        assertEquals(3, s.caret)
     }
 }

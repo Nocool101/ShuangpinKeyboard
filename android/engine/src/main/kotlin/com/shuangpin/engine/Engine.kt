@@ -775,12 +775,27 @@ enum class InputStage {
  * 留着是为了能撤销：下滑撤销要把删掉的音节原样放回去。
  */
 data class SwipeRemoval(
-    /** 被删掉的完整音节（删的是半截音节时为 null）。 */
+    /** 被删掉的完整音节（退成半截音节时也记着——撤销要还原**整个**音节）。 */
     val syllable: FinalHit? = null,
     /** 被丢掉的半截音节：声母键（没有则为 null）。 */
     val partialFirstKey: String? = null,
     /** 被丢掉的半截音节：这一声母下的候选韵母。 */
     val partialFinals: Map<String, FinalHit> = emptyMap(),
+)
+
+/**
+ * 整轮输入的**状态快照**。
+ *
+ * 「上滑停顿 = 删掉所有已输入的拼音」要用它来撤销——
+ * 一次删掉的是**整轮**，不是一格，恢复时得整个恢复。
+ */
+data class InputSnapshot(
+    val pending: List<FinalHit>,
+    val firstKey: String?,
+    val finals: Map<String, FinalHit>,
+    val stage: InputStage,
+    val insertAt: Int,
+    val caret: Int,
 )
 
 /**
@@ -896,8 +911,12 @@ class InputSession(private val engine: PinyinEngine) {
         var acc = 0
         val n = insertAt.coerceIn(0, pending.size)
         for (i in 0 until n) acc += pending[i].syllable?.length ?: 0
-        // 半截音节就在插入点上，它本身也占位置
-        if (stage == InputStage.FINAL) acc += (firstKey ?: "").length
+        // 半截音节就在插入点上，它本身也占位置。
+        //
+        // ⚠ 要按**显示出来的文字**算，不是按键位字母算：
+        // 小鹤里 sh 在 `u` 键上，预编辑区显示的是 "sh"（两个字符），
+        // 按键位字母算会少一个——光标就会落在半截音节的中间。
+        if (stage == InputStage.FINAL) acc += halfText(firstKey ?: "").length
         return acc
     }
 
@@ -1067,12 +1086,43 @@ class InputSession(private val engine: PinyinEngine) {
      */
     private fun deleteInSyllable(hit: FinalHit, k: Int, index: Int, segStart: Int): Boolean {
         val orig = hit.syllable ?: ""
-        // 删掉第 k 个字
-        val cut = orig.substring(0, k) + orig.substring(k + 1)
+        // 删掉第 k 个字：前半截 + 后半截
+        val prefix = orig.substring(0, k)
+        val suffix = orig.substring(k + 1)
+        val cut = prefix + suffix
 
-        // ① 截短之后正好只剩声母 → 退回「半截音节」，用户接着按韵母键就能补上
+        // ① 截短之后还是个体面的音节 → 直接换
+        //    （最常见："xian" 删掉 "a" → "xin"）
+        val cutHit = syllableOf(cut)
+        if (cutHit != null) {
+            pending[index] = cutHit
+            caret = segStart + k
+            return true
+        }
+
+        val prefixHit = if (prefix.isEmpty()) null else syllableOf(prefix)
+        val suffixHit = if (suffix.isEmpty()) null else syllableOf(suffix)
+
+        // ② 前后两截**各自都是音节** → 拆成两个音节
+        //
+        //    以前只留前半截、后半截直接扔掉——用户删一个字，
+        //    结果后面一截拼音凭空消失（用户反馈「删的不是一个字，是别的拼音」）。
+        if (prefixHit != null && suffixHit != null) {
+            pending[index] = prefixHit
+            pending.add(index + 1, suffixHit)
+            if (insertAt > index) insertAt++
+            caret = segStart + k
+            return true
+        }
+
+        // ③ 前半截正好只剩声母 → 退回「半截音节」，用户接着按韵母键就能补上
+        //    （"ri" 删掉 "i" → "r"，再按 "f" → "ren"）
+        //
+        //    光标停在**半截音节后面**（segStart + k = 保留部分的长度）：
+        //    停在前面的话，下一次退格会越过这个字、删到它前头去
+        //    （用户反馈「删除 u 后光标跑到 f 前面，再删就跳过 f 一直往前删」）。
         val initKey = hit.initialKey
-        if (cut.isNotEmpty() && cut == hit.initialPinyin && initKey != null) {
+        if (prefix.isNotEmpty() && prefix == hit.initialPinyin && initKey != null) {
             pending.removeAt(index)
             insertAt = index
             firstKey = initKey
@@ -1082,35 +1132,23 @@ class InputSession(private val engine: PinyinEngine) {
             return true
         }
 
-        // ② 截短之后还是个体面的音节 → 换成它
-        val newHit = syllableOf(cut)
-        if (newHit != null) {
-            pending[index] = newHit
-            caret = segStart + k
-            return true
-        }
-
-        // ③ 不成立了 → 只留光标前面那截
-        val prefix = orig.substring(0, k)
-        val prefixHit = syllableOf(prefix)
+        // ④ 前半截自己是个音节 → 换成它
+        //    （后半截不是音节，留不住——但至少只丢它自己那一截）
         if (prefixHit != null) {
             pending[index] = prefixHit
             caret = segStart + k
             return true
         }
-        // ④ 前半截正好只剩声母 → 退回半截音节（用户接着按韵母键就能补上）
-        val prefixKey = hit.initialKey
-        if (prefix.isNotEmpty() && prefix == hit.initialPinyin && prefixKey != null) {
-            pending.removeAt(index)
-            insertAt = index
-            firstKey = prefixKey
-            finals = engine.resolveFinals(prefixKey)
-            stage = InputStage.FINAL
-            caret = segStart
+
+        // ⑤ 后半截自己是个音节 → 换成它
+        //    （"wei" 删掉 "w" → "ei"；以前整个音节都被删掉了）
+        if (suffixHit != null) {
+            pending[index] = suffixHit
+            caret = segStart + k
             return true
         }
 
-        // ⑤ 整个音节删掉
+        // ⑥ 整个音节删掉
         pending.removeAt(index)
         if (insertAt > index) insertAt--
         caret = segStart
@@ -1220,12 +1258,15 @@ class InputSession(private val engine: PinyinEngine) {
     }
 
     /**
-     * 上滑删除：一次删掉「最后一个输入单元」。
+     * 上滑删除：**退一格**。
      *
-     * 退格键上滑的语义——**一次一格，逐格往回退**：
-     * - 正在敲的半截音节 → 先把这半截删掉（回到上一个完整音节之后）
-     * - 最后一个完整音节 → 删掉它（"nihao" → "ni" → 空）
-     * - 什么都没输入 → 返回 null，交给上层去删已上屏的文字
+     * 退的粒度是「**声母/韵母**」，不是整个音节：
+     *
+     * | 当前状态 | 退一格的结果 |
+     * |---|---|
+     * | 最后一个是完整音节（"ren"） | 删掉它的**韵母**，退回半截音节（"r"）——用户按个韵母键就能改 |
+     * | 最后一个已经是半截音节（"r"） | 整个删掉（没了） |
+     * | 拼音全没了 | 返回 null，交给上层去删已上屏的文字 |
      *
      * 为什么不一步删光：用户上滑往往只是想退回一两个音节重打，
      * 一步全删掉等于把已经打对的字也丢了。
@@ -1245,11 +1286,30 @@ class InputSession(private val engine: PinyinEngine) {
         }
 
         InputStage.SYLLABLE -> {
-            val hit = pending.removeLastOrNull() ?: return null
-            if (insertAt > pending.size) insertAt = pending.size
-            if (pending.isEmpty()) stage = InputStage.INITIAL
-            caret = insertionOffset()
-            SwipeRemoval(syllable = hit)
+            val hit = pending.lastOrNull()
+            if (hit == null) {
+                null
+            } else {
+                val initKey = hit.initialKey
+                if (initKey != null && hit.initialPinyin.isNotEmpty() && hit.syllable != hit.initialPinyin) {
+                    // 有声母 → 删掉韵母，退回半截音节（"ren" → "r"）
+                    pending.removeAt(pending.size - 1)
+                    if (insertAt > pending.size) insertAt = pending.size
+                    firstKey = initKey
+                    finals = engine.resolveFinals(initKey)
+                    stage = InputStage.FINAL
+                    caret = insertionOffset()
+                    // 撤销时要把**整个音节**放回去（不是还原成半截）
+                    SwipeRemoval(syllable = hit)
+                } else {
+                    // 零声母音节（ai/e/er…）没有声母可留 → 整个删掉
+                    pending.removeAt(pending.size - 1)
+                    if (insertAt > pending.size) insertAt = pending.size
+                    if (pending.isEmpty()) stage = InputStage.INITIAL
+                    caret = insertionOffset()
+                    SwipeRemoval(syllable = hit)
+                }
+            }
         }
 
         InputStage.INITIAL -> {
@@ -1259,6 +1319,45 @@ class InputSession(private val engine: PinyinEngine) {
             caret = insertionOffset()
             SwipeRemoval(syllable = hit)
         }
+    }
+
+    /**
+     * 整轮输入的状态快照（撤销「全部删掉」时用）。
+     */
+    fun snapshot(): InputSnapshot = InputSnapshot(
+        pending = pending.toList(),
+        firstKey = firstKey,
+        finals = finals,
+        stage = stage,
+        insertAt = insertAt,
+        caret = caret,
+    )
+
+    /**
+     * 把整轮输入恢复成快照的样子（撤销「全部删掉」）。
+     */
+    fun restore(snapshot: InputSnapshot) {
+        pending.clear()
+        pending.addAll(snapshot.pending)
+        firstKey = snapshot.firstKey
+        finals = snapshot.finals
+        stage = snapshot.stage
+        insertAt = snapshot.insertAt
+        caret = snapshot.caret
+    }
+
+    /**
+     * 清空**整轮**输入（不动已上屏的文字）。
+     *
+     * 「上滑停顿 = 删掉所有已输入的拼音」用这个。
+     */
+    fun clearInput() {
+        pending.clear()
+        firstKey = null
+        finals = emptyMap()
+        stage = InputStage.INITIAL
+        insertAt = 0
+        caret = 0
     }
 
     /**

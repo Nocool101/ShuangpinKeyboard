@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.util.AttributeSet
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -117,18 +118,52 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         /** 退格键上滑：一次退一格（先退最后输入的音节，再往前退，最后退已上屏的文字） */
         fun onSwipeUpDelete()
 
+        /**
+         * 退格键**上滑后停顿**：把该删的一次删光。
+         *
+         * - 正在输入拼音 → 删掉**所有**已输入的拼音
+         * - 候选栏没内容（没在输入） → 删掉**光标以前的所有内容**
+         *
+         * 下滑撤销能把删掉的原样恢复回来。
+         */
+        fun onSwipeUpDeleteAll() {}
+
         /** 退格键下滑：撤销 */
         fun onUndo()
 
         /**
-         * 在键盘输入区（字母区）**横向滑动**：移动候选选择。
+         * 在键盘输入区（字母区）**横向滑动**。
          *
-         * 方向跟选中的候选在候选栏里的移动方向一致：
-         * **手指往右 = 往后翻（往右边的候选走）**，往左 = 往前翻。
+         * 这一下手势有两种含义，看服务层当前有没有在输入：
          *
-         * @param steps 位移步数（正 = 往后，负 = 往前）
+         * | 当前状态 | 横向滑动 |
+         * |---|---|
+         * | **正在输入**（有预编辑内容） | 移动候选选择（手指往右 = 往后翻） |
+         * | **没有输入** | **挪光标**（手指往右 = 光标往右，一个字一个字） |
+         *
+         * 「手往哪个方向滑，光标就往哪个方向走」——
+         * 没输入的时候，字母区就是一块**跟手拖动板**：
+         * 光标挪多远 = 手指走了多远 ÷ 一个字的宽度
+         * （滑得快光标就走得快，滑得慢就走得慢）。
+         *
+         * 纵向的滑动**不算手势**（很容易误触，用户反馈）——
+         * 吃掉但什么都不做，既不挪光标也不打字母。
+         *
+         * @param steps 位移步数（正 = 手指往右）：候选个数 / 字数
          */
-        fun onCandidateSwipe(steps: Int) {}
+        fun onLetterSwipe(steps: Int) {}
+
+        /**
+         * **长按之后**在字母区横向滑动 → 挪**拼音里的光标**。
+         *
+         * 直接滑动是「选候选」；**手指先按住不动**（长按），再滑，
+         * 这一滑就变成「挪拼音光标」——
+         * 手指不用离开键盘，就能把光标挪到打错的那个音节上，
+         * 接着按正确的键就能改（不用去预编辑区里点那个字）。
+         *
+         * @param steps 位移步数（正 = 往右）：拼音的**字**数
+         */
+        fun onPinyinCaretMove(steps: Int) {}
 
         /** 切换布局 */
         fun onModeChanged(mode: Mode)
@@ -200,6 +235,23 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             }
         }
 
+    /**
+     * 空格键的**长按**是不是被「按住说话」占着。
+     *
+     * 占着的时候，空格键上长按滑动仍然是「选候选」；
+     * 没占着（语音没开 / 正在打拼音没法说话），
+     * 空格键上的长按滑动就用来**挪拼音光标**——
+     * 空格键最大最顺手，用户按住那儿滑是很自然的动作，
+     * 不该浪费掉（用户反馈「按下停顿移动拼音光标……然后就滑不动了」：
+     * 他多半就是按着空格滑的，滑出来的是候选移动，不是光标）。
+     *
+     * 服务层按当前状态改这个标志（见 `canTalkBySpace()`）。
+     */
+    var spaceLongPressForVoice: Boolean = true
+        set(value) {
+            if (field != value) field = value
+        }
+
     /** 空格键的文案。**固定是「空格」**——不跟着编辑框的 action 变。 */
     var spaceLabel: String = "空格"
         set(value) {
@@ -244,17 +296,49 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
     private var downY = 0f
     private var swiped = false
 
-    // 候选选择滑动（需求：滑动键盘输入区可以选候选区文字）
+    // 候选选择滑动 / 光标移动滑动
     //
     // 这一下手势**只从字母区起**——底栏是功能键（空格/退格/确认），
     // 侧边那条是语音键，都有自己的手势，不能抢。
+    //
+    // **只认横向**：正在输入时横向选候选，没输入时横向挪光标。
+    // 纵向的滑动不算手势（用户反馈「上滑很容易误触」）。
     private var swipeEligible = false
-    private var reportedSteps = 0
-    private var horizontalSwiped = false
+    private var reportedSteps = 0     // 候选模式：横向候选步数
+    private var reportedChars = 0     // 光标模式：横向字数
+    private var swiping = false       // 这一下是不是滑动（横竖都算）
+
+    // ---- 长按滑动 = 挪拼音光标 ----
+    //
+    // 直接滑动是「选候选」；**先按住不动**（长按），这一滑就变成「挪拼音光标」。
+    // 这样用户不用把手挪到输入框里去点拼音中间，手指一直在键盘上就能改拼音。
+    //
+    // 长按到点了给一次震动 + 键盘顶上画一条蓝线，
+    // 让用户知道「现在是挪光标，不是选候选」——不然这一滑啥反应都没有，
+    // 用户会以为手势没生效。
+    private var caretMode = false      // 长按已触发：这一下滑是挪拼音光标
+    private var caretSteps = 0         // 已经挪了几个拼音字
+    private var pressActive = false    // 这一下还按着（长按计时器用）
 
     // 长按退格连删
     private val handler = Handler(Looper.getMainLooper())
     private var repeating = false
+
+    /**
+     * 长按到点了 → 这一下滑变成「挪拼音光标」。
+     *
+     * 只在手指**没动**的时候触发：只要越过了滑动阈值，
+     * 这一下就当成普通的滑动（选候选），长按计时器会被撤掉。
+     */
+    private val longPressStarter = object : Runnable {
+        override fun run() {
+            if (!pressActive || swiping || swiped) return
+            caretMode = true
+            caretSteps = 0
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            invalidate()
+        }
+    }
 
     private val repeatDelete = object : Runnable {
         override fun run() {
@@ -314,6 +398,33 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         val steps = 1 + ((d - threshold) / swipeStepPx()).toInt()
         return if (dx > 0) steps else -steps
     }
+
+    /**
+     * 现在是「挪光标」模式吗？——**没有待上屏的输入**的时候。
+     */
+    private fun cursorMode(): Boolean {
+        val s = session ?: return true
+        return s.composingText.isEmpty()
+    }
+
+    /**
+     * 横向走了多远 = 光标挪几个**字**。
+     *
+     * 手指走过的距离 ÷ 一个字的宽度 = 字数。
+     * **跟手**：手指滑得快，光标就走得快；滑得慢就走得慢。
+     */
+    private fun cursorCharSteps(dx: Float): Int =
+        (dx / dp(CURSOR_PX_PER_CHAR_DP)).toInt()
+
+    /**
+     * 横向走了多远 = **拼音光标**挪几个字。
+     *
+     * 拼音的字母比正文小得多（一个字母 ~9 dp），
+     * 所以一步比挪正文光标更短——不然轻轻一滑就跳过去好几个字，
+     * 根本停不到想改的那个音节上。
+     */
+    private fun caretCharSteps(dx: Float): Int =
+        (dx / dp(CARET_PX_PER_CHAR_DP)).toInt()
 
     // ---- 画笔 ----
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -377,7 +488,6 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
     private fun layoutKeys() {
         keys.clear()
         if (width <= 0 || height <= 0) return
-
         val pad = dp(3f)
         val gap = dp(4f)
         val rowGap = dp(6f)
@@ -408,7 +518,30 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         if (mode != Mode.NUMBER) {
             layoutBottomBar(pad, gap, bottomH, oneHand)
         }
+        computeLetterArea()
     }
+
+    /**
+     * 字母区（键 + 键之间的缝隙）的范围。
+     *
+     * 手指落在**键与键的缝隙**里时，`findKey` 找不到键——
+     * 老代码就认为「没按到键」，滑动不触发（用户反馈：
+     * 「滑动起始位置在键盘交叉处无法触发滑动」）。
+     *
+     * 这里把字母键的**并集**算出来，缝隙也在里面：
+     * 只要起点在字母区内，滑动就认。
+     */
+    private fun computeLetterArea() {
+        var area: RectF? = null
+        for (k in keys) {
+            if (k.kind != Kind.PINYIN && k.kind != Kind.RAW) continue
+            if (area == null) area = RectF(k.rect) else area.union(k.rect)
+        }
+        letterArea = area
+    }
+
+    /** 字母区的范围（可能是 null）。 */
+    private var letterArea: RectF? = null
 
     /** 字母区（和底栏）的横向范围。单手模式收窄到拇指那一侧。 */
     private var blockLeft = 0f
@@ -443,6 +576,10 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
      * 整个标点面板还在底栏的「符」键里（那边字更全）。
      *
      * 全键盘模式没有留白区，标点走底栏的「符」键。
+     *
+     * **这一列贴着屏幕的远端**（右手模式贴左，左手模式贴右）：
+     * 键盘本体缩到拇指那一侧之后，中间空出来一大条，
+     * 标点列贴在远端像一条「边栏」，不跟键盘本体挤在一起。
      */
     private fun layoutSideColumn(gap: Float, bottomH: Float) {
         // 留白条有多宽取决于屏宽和 ONE_HAND_WIDTH_RATIO，
@@ -458,8 +595,10 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         }
         val stripW = stripRight - stripLeft
         if (stripW < dp(30f)) return   // 太窄就干脆不放，别做一个按不到的键
-        val w = stripW.coerceAtMost(dp(52f))
-        val x = if (layout == Layout.RIGHT) stripRight - w else stripLeft
+        // 标点列**把留白填满**（上限 64 dp）：留白太宽看着像屏幕那边坏了
+        val w = stripW.coerceAtMost(dp(64f))
+        // 贴远端：右手模式贴屏幕左边，左手模式贴屏幕右边
+        val x = if (layout == Layout.RIGHT) stripLeft else stripRight - w
         // 竖长：从键盘顶一直到底，每个标点占一格
         val top = dp(3f)
         val h = height - top - dp(3f)
@@ -508,25 +647,45 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         }
 
         // 宽度分配：空格要宽，但动作键不能太窄（它是常用键）
+        //
+        // ⚠ **单手模式下功能键必须跟着缩**：整块键盘只有 60% 宽了，
+        // 六个键还按原来的宽度排，最后一个键会顶出屏幕右边（右手模式）。
+        // 「中/英」是三个字，缩太窄字装不下，给它单独一档宽度（比例 1.5）。
         val others = items.size - 1
         val avail = blockWidth - pad * 2 - gap * (items.size - 1)
-        val otherW = dp(
+        val cjkCount = items.count { it.id == "mode_english" }
+        val cjkRatio = if (oneHand) 1.5f else 1.0f
+        var otherW = dp(
             when {
-                oneHand -> 42f
+                oneHand -> 26f
                 items.size >= 6 -> 40f
                 else -> 48f
             }
         )
-        val actionW = dp(if (oneHand) 54f else 62f)
+        var actionW = dp(if (oneHand) 34f else 62f)
         // 动作键和退格键固定宽，其余（含空格）分剩下的
         val fixedOthers = others - 1   // 除动作键外的功能键个数
-        val spaceW = (avail - otherW * fixedOthers - actionW).coerceAtLeast(dp(70f))
+        val minSpace = dp(if (oneHand) 40f else 70f)
+        // 三字键（「中/英」）比普通功能键多占的那一份
+        val extraW = otherW * (cjkRatio - 1f) * cjkCount
+        var spaceW = avail - otherW * fixedOthers - extraW - actionW
+        // 屏宽很窄的时候，光固定键自己就排不下 —— 整体缩一档，别顶出屏幕
+        if (spaceW < minSpace) {
+            val fixed = otherW * fixedOthers + extraW + actionW
+            val k = ((avail - minSpace) / fixed).coerceIn(0.4f, 1f)
+            otherW *= k
+            actionW *= k
+            spaceW = avail - otherW * fixedOthers - otherW * (cjkRatio - 1f) * cjkCount - actionW
+        }
+        spaceW = spaceW.coerceAtLeast(minSpace)
+        val cjkW = otherW * cjkRatio
 
         var x = blockLeft + pad
         for (item in items) {
-            val w = when (item.kind) {
-                Kind.SPACE -> spaceW
-                Kind.ACTION -> actionW
+            val w = when {
+                item.kind == Kind.SPACE -> spaceW
+                item.kind == Kind.ACTION -> actionW
+                item.id == "mode_english" -> cjkW
                 else -> otherW
             }
             keys += Key(
@@ -718,6 +877,9 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 else -> drawPlain(canvas, key)
             }
         }
+        // 「挪拼音光标」模式**不画任何东西**：
+        // 曾经在键盘顶上画过一条蓝条当提示，用户反馈「非常影响观感」。
+        // 现在只靠一次震动 + 输入框里那个会动的光标告诉用户模式变了。
     }
 
     private fun drawPinyin(canvas: Canvas, key: Key) {
@@ -745,11 +907,16 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         }
         canvas.drawRoundRect(key.rect, dp(8f), dp(8f), stroke)
 
+        // 键宽不够的时候（小鹤双拼的单手模式），键面只留**第一个**标签，
+        // 字号也跟着缩——两个都塞进去只会糊成一片。
+        val maxWidth = key.rect.width() - dp(6f)
+        val narrow = key.rect.width() < dp(28f)
+
         // 键位字母角标：告诉用户「这个键上按的是哪个字母」。
         // 韵母位上主标签让给韵母了，角标就是唯一的找键线索，必须够大看得清。
         face.badge?.let { badge ->
             badgeText.color = if (face.dead) COLOR_DEAD_TEXT else COLOR_BADGE
-            badgeText.textSize = dp(11.5f)
+            badgeText.textSize = dp(if (narrow) 9.5f else 11.5f)
             canvas.drawText(badge, key.rect.left + dp(3f), key.rect.top + dp(11f), badgeText)
         }
 
@@ -760,9 +927,7 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         bigText.color = if (face.dead) COLOR_DEAD_TEXT else COLOR_INK
         bigText.textSize = dp(if (face.big.length >= 3) 14f else 17f)
         // 太长就缩字号，避免超出键宽（"er/uan"、"iang/uang" 这类）
-        val maxWidth = key.rect.width() - dp(6f)
         // 单手模式键窄，下限放低一点，不然「uang」这种缩到 9dp 还是装不下
-        val narrow = key.rect.width() < dp(28f)
         val minSize = if (narrow) dp(7f) else dp(9f)
         // 窄键上「ing/uai」这种带斜杠的**主标签**（韵母位里无效键的提示）
         // 只留第一个——塞不下两个，糊到隔壁键上更糟。
@@ -770,7 +935,8 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         while (bigText.measureText(bigShown) > maxWidth && bigText.textSize > minSize) {
             bigText.textSize -= dp(0.5f)
         }
-        val bigBaseline = key.rect.centerY() - dp(if (hasSub) 4f else 0f) -
+        // 有副标签时，主标签往上抬一点，给底部的拼音腾地方
+        val bigBaseline = key.rect.centerY() - dp(if (hasSub) 6f else 0f) -
             (bigText.descent() + bigText.ascent()) / 2f
         canvas.drawText(bigShown, key.rect.centerX(), bigBaseline, bigText)
 
@@ -781,25 +947,44 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             var shown = if (narrow) sub.substringBefore('/') else sub
             smallText.color = if (face.dead) COLOR_DEAD_TEXT else COLOR_MUTED
             smallText.isFakeBoldText = true
-            smallText.textSize = dp(11f)
-            while (smallText.measureText(shown) > maxWidth && smallText.textSize > dp(6f)) {
+            // **拼音提示是小字**：它只是提示，按的是键上的大字。
+            // 长的（「ia/ua」「ing/uai」「iang/uang」）再小一号——
+            // 那几个正好都在最下面一排，太大就把键面撑满了（用户反馈
+            // 「最下面一排拼音有些大」）。
+            //
+            // 拼音是**灰色小字**，允许它贴到键边（留 2dp 就行）：
+            // 主标签留 6dp 是因为它又大又粗，拼音不用。
+            val subMax = key.rect.width() - dp(2f)
+            smallText.textSize = dp(if (shown.length >= 4) 9f else 10f)
+            while (smallText.measureText(shown) > subMax && smallText.textSize > dp(6f)) {
                 smallText.textSize -= dp(0.5f)
             }
             // 还是装不下就换个短的（「整体认读」→「整读」），
             // 再装不下就不画——宁可少个提示，也不要糊到隔壁键上去。
-            if (smallText.measureText(shown) > maxWidth) {
+            if (smallText.measureText(shown) > subMax) {
                 val shorter = when {
                     shown.startsWith("整体认读") -> "整读"
                     else -> ""
                 }
-                if (shorter.isNotEmpty() && smallText.measureText(shorter) <= maxWidth) {
-                    shown = shorter
+                if (shorter.isNotEmpty()) {
+                    // 短的也要缩到装得下为止（单手模式键很窄），
+                    // 宁可小一点，也要把「这个键是整体认读」这件事说出来。
+                    smallText.textSize = dp(if (shown.length >= 4) 9f else 10f)
+                    while (smallText.measureText(shorter) > subMax && smallText.textSize > dp(6f)) {
+                        smallText.textSize -= dp(0.5f)
+                    }
+                    shown = if (smallText.measureText(shorter) <= subMax) shorter else ""
                 } else {
                     shown = ""
                 }
             }
             if (shown.isNotEmpty()) {
-                canvas.drawText(shown, key.rect.centerX(), bigBaseline + dp(14f), smallText)
+                // **拼音提示贴在键底**：以前它紧跟在主标签下面，悬在键面中间，
+                // 键的下半截空着，顶排尤其明显（用户反馈
+                // 「把最上面一排拼音适当向下降一些」）。
+                // 钉到键底之后，三排的拼音在同一条基线上，手指点下去也正好压住大字。
+                val subBaseline = key.rect.bottom - dp(4.5f)
+                canvas.drawText(shown, key.rect.centerX(), subBaseline, smallText)
             }
         }
     }
@@ -836,6 +1021,13 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 else -> 17f
             }
         )
+        // 键宽有限：字装不下就缩一号。
+        // 单手模式的功能键跟着键盘缩了 2/3，「中/英」这种三字键
+        // 不缩就会顶到隔壁键上（用户反馈「最下面一排拼音按键有些大」）。
+        val maxW = key.rect.width() - dp(8f)
+        while (bigText.measureText(label) > maxW && bigText.textSize > dp(9f)) {
+            bigText.textSize -= dp(0.5f)
+        }
         val baseline = key.rect.centerY() - (bigText.descent() + bigText.ascent()) / 2f
         canvas.drawText(label, key.rect.centerX(), baseline, bigText)
     }
@@ -856,12 +1048,27 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 downX = event.x
                 downY = event.y
                 swiped = false
-                // 横向滑动选候选：字母区和**空格键**都认
+                // 滑动选候选 / 挪光标：字母区和**空格键**都认
                 // （空格键最大最顺手，用户多半在那儿滑；
-                //  退格键和侧边语音键各有各的手势，不抢）
-                swipeEligible = key?.kind == Kind.PINYIN || key?.kind == Kind.SPACE
+                //  退格键和侧边语音键各有各的手势，不抢）。
+                // 英文、数字、标点面板的键也算——没输入的时候，
+                // 在哪儿滑都能挪光标。
+                //
+                // ⚠ **没按到键也算**：手指落在键与键的缝隙里时，
+                // 只要起点在字母区范围内，滑动照样触发
+                // （用户反馈「滑动起始位置在键盘交叉处无法触发滑动」）。
+                swipeEligible = when {
+                    key != null -> key.kind == Kind.PINYIN ||
+                        key.kind == Kind.RAW ||
+                        key.kind == Kind.SPACE
+                    else -> letterArea?.contains(event.x, event.y) == true
+                }
                 reportedSteps = 0
-                horizontalSwiped = false
+                reportedChars = 0
+                swiping = false
+                caretMode = false
+                caretSteps = 0
+                pressActive = true
                 if (key != null) {
                     performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     invalidate()
@@ -879,6 +1086,15 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                     voiceArmed = false
                     voiceStarted = false
                     handler.postDelayed(voiceHoldStarter, VOICE_HOLD_MS)
+                }
+                // 长按滑动 = 挪拼音光标：按住不动到阈值，这一滑就变成挪光标。
+                //
+                // 字母区随时可以；**空格键**只有在「按住说话」没占着它的时候才可以
+                // （见 [spaceLongPressForVoice]）——空格键最大最顺手，
+                // 用户按住那儿滑是很自然的动作，不该浪费掉。
+                val spaceOk = key?.kind != Kind.SPACE || !spaceLongPressForVoice
+                if (swipeEligible && spaceOk) {
+                    handler.postDelayed(longPressStarter, LONG_PRESS_MS)
                 }
                 return true
             }
@@ -901,24 +1117,59 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                         voiceArmed = false
                     }
                 }
-                // 横向滑动 = 选候选。
-                // 字母键上**没有别的手势**（退格键的上下滑只发生在退格键上），
-                // 所以只要横向位移够了就算滑动——手指先往下带一点再往右滑，
-                // 那是人手的自然动作，不该因为 dy 稍大就判成「没滑」。
-                if (swipeEligible && !horizontalSwiped && abs(dx) > swipeThresholdPx()) {
-                    horizontalSwiped = true
-                    swiped = false          // 别把它误判成退格键的上滑/下滑
-                    repeating = false
-                    pressed = null
-                    invalidate()
+                // 滑动识别：**只认横向**。
+                //
+                // 纵向的滑动（往上/往下划）**不算手势、不做任何事**——
+                // 以前它会让光标换行（很容易误触，用户反馈），
+                // 现在直接吃掉：既不挪光标，也不把那个字母打出来。
+                if (swipeEligible && !swiping) {
+                    val threshold = swipeThresholdPx()
+                    if (abs(dx) > threshold || abs(dy) > threshold) {
+                        swiping = true
+                        swiped = false          // 别把它误判成退格键的上滑/下滑
+                        repeating = false
+                        pressed = null
+                        // 手指已经滑起来了 → 这一下是**普通滑动**（选候选），
+                        // 不是长按之后才触发的「挪拼音光标」。
+                        handler.removeCallbacks(longPressStarter)
+                        invalidate()
+                    }
                 }
-                if (horizontalSwiped) {
-                    // **手指往右 = 候选往右走**（跟选中的候选在候选栏里的移动方向一致）：
-                    // 手指往右就往后翻，往左就往前翻。
-                    val steps = candidateSteps(dx)
-                    if (steps != reportedSteps) {
-                        listener?.onCandidateSwipe(steps - reportedSteps)
-                        reportedSteps = steps
+                if (swiping) {
+                    if (caretMode && !cursorMode()) {
+                        // 长按之后的滑动：挪**拼音里的光标**。
+                        // 手指不用离开键盘就能把光标挪到打错的音节上。
+                        val chars = caretCharSteps(dx)
+                        if (chars != caretSteps) {
+                            Log.d(
+                                "ShuangpinIME",
+                                "swipe: 挪拼音光标 dx=$dx 步数=${chars - caretSteps} (累计 $chars 字)",
+                            )
+                            listener?.onPinyinCaretMove(chars - caretSteps)
+                            caretSteps = chars
+                        }
+                    } else if (cursorMode()) {
+                        // 挪光标：横向按**字**挪，挪多少 = 手指走了多远 ÷ 一个字的宽度
+                        val chars = cursorCharSteps(dx)
+                        if (chars != reportedChars) {
+                            Log.d(
+                                "ShuangpinIME",
+                                "swipe: 挪光标 dx=$dx 步数=${chars - reportedChars} (累计 $chars 字)",
+                            )
+                            listener?.onLetterSwipe(chars - reportedChars)
+                            reportedChars = chars
+                        }
+                    } else {
+                        // 选候选：横向一步一个候选
+                        val steps = candidateSteps(dx)
+                        if (steps != reportedSteps) {
+                            Log.d(
+                                "ShuangpinIME",
+                                "swipe: 选候选 dx=$dx 步数=${steps - reportedSteps} (累计 $steps 个)",
+                            )
+                            listener?.onLetterSwipe(steps - reportedSteps)
+                            reportedSteps = steps
+                        }
                     }
                     return true
                 }
@@ -931,6 +1182,9 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                         repeating = false
                         pressed = null
                         invalidate()
+                        // 上滑之后**手指停住不动** = 「删全部」：
+                        // 起一个计时器，手指还按着就说明用户是故意的停顿。
+                        if (downY - event.y > 0) startSwipeHoldTimer()
                     }
                 }
                 return true
@@ -943,13 +1197,17 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 // 「按住说话」的装填是**延迟**问的：手指一抬就必须撤掉，
                 // 否则松手之后才开始录音（那时候用户已经不在按了）。
                 handler.removeCallbacks(voiceHoldStarter)
+                // 长按计时器同理：手指都抬了，不能再进「挪光标」模式
+                handler.removeCallbacks(longPressStarter)
+                pressActive = false
+                caretMode = false
                 invalidate()
-                // 横向滑动选候选：这一下**不是**按键，别把字母打出来
-                if (horizontalSwiped) {
+                // 滑动：这一下**不是**按键，别把字母打出来
+                if (swiping) {
                     swipeKey = null
                     swiped = false
                     swipeEligible = false
-                    horizontalSwiped = false
+                    swiping = false
                     performClick()
                     return true
                 }
@@ -973,8 +1231,13 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                     return true
                 }
                 if (swiped && swipeKey != null) {
-                    // 上滑 = 逐格往回退，下滑 = 撤销
-                    if (downY - event.y > 0) listener?.onSwipeUpDelete() else listener?.onUndo()
+                    // 上滑 = 退一格，下滑 = 撤销
+                    // 「上滑后停顿」已经触发过「删全部」，这一下就不要再退一格了
+                    if (downY - event.y > 0) {
+                        if (!swipeHoldFired) listener?.onSwipeUpDelete()
+                    } else {
+                        listener?.onUndo()
+                    }
                     performClick()
                 } else if (key != null && findKey(event.x, event.y) == key) {
                     fire(key)
@@ -982,6 +1245,7 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 }
                 swipeKey = null
                 swiped = false
+                stopSwipeHoldTimer()
                 return true
             }
 
@@ -990,9 +1254,13 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 swipeKey = null
                 swiped = false
                 swipeEligible = false
-                horizontalSwiped = false
+                swiping = false
                 stopRepeat()
+                stopSwipeHoldTimer()
                 handler.removeCallbacks(voiceHoldStarter)
+                handler.removeCallbacks(longPressStarter)
+                pressActive = false
+                caretMode = false
                 if (voiceStarted) listener?.onVoiceCancel()
                 voiceArmed = false
                 voiceStarted = false
@@ -1012,6 +1280,30 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
     private fun stopRepeat() {
         repeating = false
         handler.removeCallbacks(repeatDelete)
+    }
+
+    // ---- 上滑停顿 = 删全部 ----
+    //
+    // 退格键往上滑一下 = 退一格；**滑上去停住不动** = 把该删的一次删光。
+    // 靠「手指还按着」来判断：滑上去之后如果一直不动，就是故意的停顿。
+    private var swipeHoldFired = false
+
+    private val swipeHoldTimer = object : Runnable {
+        override fun run() {
+            swipeHoldFired = true
+            listener?.onSwipeUpDeleteAll()
+        }
+    }
+
+    private fun startSwipeHoldTimer() {
+        swipeHoldFired = false
+        handler.removeCallbacks(swipeHoldTimer)
+        handler.postDelayed(swipeHoldTimer, SWIPE_HOLD_MS)
+    }
+
+    private fun stopSwipeHoldTimer() {
+        handler.removeCallbacks(swipeHoldTimer)
+        swipeHoldFired = false
     }
 
     private fun fire(key: Key) {
@@ -1058,19 +1350,32 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
 
     companion object {
         /**
-         * 单手模式：字母区占屏宽的比例。
+         * 单手模式：整块键盘占屏宽的比例。
          *
-         * 0.86 是「拇指够得到」和「键还够大」之间的折中：
-         * 全屏宽时每键 31.7 dp，收窄到 86% 后每键约 26.6 dp。
+         * **0.80 = 键宽 25 dp（比全键盘的 32 dp 小，但还能按得准）**。
          *
-         * **为什么不是更窄**：收到 72% 的时候反馈是「左侧大片空白浪费，键还有点小」——
-         * 收窄换来的只是键变小，空白还是浪费。86% 把浪费压到一条 51dp 的窄条，
-         * 那条窄条放一个竖长的语音键，不浪费。
+         * 这一版的比例来回改过两轮：
          *
-         * 候选栏要用同一个比例收窄（见 ShuangpinImeService.applyKeyLayout），
-         * 所以这个常量是 public 的。
+         * | 比例 | 键宽 | 问题 |
+         * |---|---|---|
+         * | 0.86（旧） | 27 dp | 键够大，但整块横跨 86% 屏宽，**最左边几颗拇指够不着** |
+         * | 0.60（第一轮） | 18 dp | 键太小按不准 + **左边空出 40% 一大片**（用户反馈「按键太小，且有大面积空白区域」）|
+         * | **0.80（本轮）** | **25 dp** | 键比第一轮大 40%，空白压到一条标点列，整块仍贴着拇指那一侧 |
+         *
+         * ⚠ **「整块都在拇指下」和「键够大」在 QWERTY 布局下是死结**：
+         * 一排 10 个键，键宽 25 dp 就要 270 dp，比一个拇指能扫过去的范围（约 150 dp）宽得多。
+         * 想要整块都在拇指下，只能减键（10 键 → 6 键）或者把键做小——
+         * 前者会毁掉双拼的**位置记忆**（小鹤 zh→v / ch→i / sh→u），后者就是第一轮被否掉的方案。
+         * 所以这里取折中：**键保持能按准的大小，整块尽量往拇指那一侧挤**。
+         *
+         * ⚠ **只有单手模式收窄**：全键盘模式两根手都能按，
+         * 键摊满屏宽才是对的（收窄只会白白浪费屏宽）。
+         *
+         * 候选栏**不跟着缩**（它有自己的一套比例，见 ShuangpinImeService）——
+         * 候选栏缩了，一页能看见的候选太少，翻起来更累。
+         * 这个常量是 public 的（服务层要拿它算留白）。
          */
-        const val ONE_HAND_WIDTH_RATIO = 0.86f
+        const val ONE_HAND_WIDTH_RATIO = 0.80f
 
         /** 退格键纵向滑动触发阈值（px）。 */
         private const val SWIPE_THRESHOLD = 60f
@@ -1094,12 +1399,49 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
          * 候选滑动一步的距离（dp）：一步 = 挪一个候选。
          *
          * 单手模式下候选栏宽 310 dp，一个候选大概 40 dp 宽，
-         * 44 dp 正好对得上「滑一格换一个候选」。
+         * 36 dp 正好对得上「滑一格换一个候选」。
+         * （原来 44 dp 偏慢，滑半天换不了一个候选。）
          */
-        private const val CANDIDATE_SWIPE_STEP_DP = 44f
+        private const val CANDIDATE_SWIPE_STEP_DP = 36f
+
+        /**
+         * **挪光标**时，手指走多远算挪一个字（dp）。
+         *
+         * 取一个字的宽度（正文里一个汉字差不多 16~20 dp），
+         * 这样手指在屏幕上划过一个字，光标也正好挪一个字——**跟手**。
+         * （原来 16 dp 偏快，容易一滑出去好几个字。）
+         */
+        private const val CURSOR_PX_PER_CHAR_DP = 20f
+
+        /**
+         * **长按**多久算「进入挪拼音光标模式」（ms）。
+         *
+         * 250 ms：比「按住说话」的 300 ms 还短一点，
+         * 保证**空格键**上两个手势不打架（语音占着的时候空格键压根不进这个模式）。
+         *
+         * 不能再短了：手指一沾到键就开始滑的那种「快速滑选候选」会被误判成挪光标，
+         * 候选就选不了了（用户反馈「滑动选词」是常用手势，不能被它吃掉）。
+         */
+        private const val LONG_PRESS_MS = 250L
+
+        /**
+         * 挪**拼音光标**时，手指走多远算挪一个拼音字（dp）。
+         *
+         * 拼音的字母比正文小得多（一个字母 ~9 dp），
+         * 所以比挪正文光标（20 dp）短——不然轻轻一滑就跳过去好几个字，
+         * 根本停不到想改的那个音节上。
+         */
+        private const val CARET_PX_PER_CHAR_DP = 12f
 
         /** 长按退格多久开始连删（ms）。 */
         private const val REPEAT_DELAY_MS = 350L
+
+        /**
+         * 退格键**上滑后停顿**多久算「删全部」（ms）。
+         *
+         * 手指滑上去一直不动 → 用户是故意的停顿，不是手滑。
+         */
+        private const val SWIPE_HOLD_MS = 400L
 
         /** 长按连删的间隔（ms）。 */
         private const val REPEAT_INTERVAL_MS = 60L
