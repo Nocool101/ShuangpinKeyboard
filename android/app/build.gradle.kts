@@ -16,9 +16,9 @@ android {
         applicationId = "com.shuangpin.ime"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        // 首个发布版 v0.0.1（发布包放在 发布版/v0.0.1/）
-        versionName = "0.0.1"
+        versionCode = 2
+        // 第二个发布版 v0.0.2（发布包放在 发布版/v0.0.2/）
+        versionName = "0.0.2"
 
         // 端侧重排模型用 ONNX Runtime。
         // onnxruntime-mobile 是精简版（整包 6.9 MB），全量 AAR 有 50 MB，装不下。
