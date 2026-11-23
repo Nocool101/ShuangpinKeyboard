@@ -34,7 +34,7 @@ interface AsrEngine {
 /**
  * HTTP 一次性上传的识别引擎。
  *
- * 移植自 `minimal-voice-ime-main` 的 `asr/HttpAsrEngine.java`，
+ * 移植自「极简语音输入法 Minimal Voice IME」（@科技小辛，MIT）的 `asr/HttpAsrEngine.java`，
  * 改动：OkHttp → `HttpURLConnection`、Gson → 引擎层的 `MiniJson`
  * （本项目的引擎模块刻意零依赖）。
  *

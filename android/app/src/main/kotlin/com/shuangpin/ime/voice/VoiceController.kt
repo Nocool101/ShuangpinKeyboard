@@ -7,7 +7,8 @@ import android.os.Looper
 /**
  * 语音输入的流程控制。
  *
- * 移植自 `minimal-voice-ime-main` 的 `MinimalVoiceIME` 里的录音/识别那一段，
+ * 移植自「极简语音输入法 Minimal Voice IME」（@科技小辛，MIT）的 `MinimalVoiceIME`
+ * 里的录音/识别那一段，
  * 砍掉了：本地模型、流式中间结果、失败重试、蓝牙 SCO、剪贴板历史、
  * 口语整理（那部分跟本项目的「大模型可配置」重复了）。
  *

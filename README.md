@@ -381,8 +381,8 @@ JVM 基线（`DictionaryLoadBenchmark` 自动测，本机实测），安卓 ART 
 | 本项目源码 | **GPL-3.0** | 引擎 + 安卓外壳 + 工具链 |
 | 词库数据（`phrases.txt` / `chars.txt`） | **GPL-3.0** | 来自 rime-ice，这条决定了整个项目的许可 |
 | 端侧重排模型（`lm_step.ort`） | **Apache-2.0** | 来自 chinese-ime-lm，可闭源商用；语料署名见 `android/engine/src/main/resources/ime/reranker/NOTICE` |
-| 语音输入子项目（`minimal-voice-ime-main/`） | **MIT** | 仅移植其 HTTP 上传识别链路 |
-| ONNX Runtime / OkHttp / Gson | MIT / Apache-2.0 | 构建期依赖，不随源码分发 |
+| 语音识别链路（移植自 @科技小辛 的「极简语音输入法」） | **MIT** | 只移植了 HTTP 上传识别一条链路，上游源码不随本仓库分发 |
+| ONNX Runtime | MIT | 端侧重排模型的推理运行时，构建期依赖，不随源码分发 |
 
 完整的第三方出处、义务与署名要求见 [NOTICE](NOTICE)。
 

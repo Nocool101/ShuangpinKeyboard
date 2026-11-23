@@ -10,7 +10,7 @@ import android.media.MediaRecorder
 /**
  * 16 kHz 单声道 PCM16 采集。
  *
- * 移植自 `minimal-voice-ime-main` 的 `audio/AudioRecorder.java`，
+ * 移植自「极简语音输入法 Minimal Voice IME」（@科技小辛，MIT）的 `audio/AudioRecorder.java`，
  * 改动只有两处：
  * 1. 去掉蓝牙 SCO 那套（那项目自己后来也删了，理由是「SCO 没建好会录到一片静音」）；
  * 2. 蓝牙麦如果确实要用，走系统默认的 `VOICE_RECOGNITION` 源，由系统自己选设备。

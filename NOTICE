@@ -14,7 +14,7 @@
 |---|---|
 | 来源 | [rime-ice](https://github.com/iDvel/rime-ice)（雾凇拼音） |
 | 许可 | **GPL-3.0**（上游 `LICENSE` 原文见 <https://github.com/iDvel/rime-ice/blob/main/LICENSE>） |
-| 本项目使用方式 | `tools/import_dict.mjs` 按 rime-ice 官方 `import_tables` 顺序合并各词库，转换成 `phrases.txt`（781,804 条）与 `chars.txt`（412 音节），词频编码为 `round(log2(weight) * 4)` |
+| 本项目使用方式 | `tools/import_dict.mjs` 按 rime-ice 官方 `import_tables` 顺序合并各词库，转换成 `phrases.txt`（779,066 条）与 `chars.txt`（412 音节），词频编码为 `round(log2(weight) * 4)` |
 | 原始包 | rime-ice 的 `full.zip`，默认解压到 `D:\tmp\rime-ice-dict\full` |
 
 > ⚠️ 分发本项目的 APK 或任何含词库的产物时，**必须**：
@@ -36,25 +36,55 @@
 > 但它随本仓库以 GPL-3.0 一并分发时，署名文件（`reranker/NOTICE`）必须保留，
 > 且 ONNX 图元数据中的 `attribution` 字段不得删除。
 
-## 3. 语音输入子项目（MIT）
+## 3. 语音识别链路（MIT）— 移植自第三方项目
 
 | 项 | 内容 |
 |---|---|
-| 路径 | `minimal-voice-ime-main/`（随仓库内嵌的独立项目） |
-| 许可 | **MIT** — Copyright (c) 2026 科技小辛（许可全文见 `minimal-voice-ime-main/LICENSE`） |
-| 本项目使用方式 | 仅移植其 **HTTP 上传识别** 一条链路（`app/voice/HttpAsrEngine.kt`）到本项目 Kotlin 外壳；本地 sherpa-onnx 模型、流式中间结果、蓝牙 SCO、口语整理均未使用 |
-| 内含原生库 | `app/src/main/jniLibs/arm64-v8a/` 下的 `libsherpa-onnx-*.so`、`libonnxruntime.so`、`libllm.so` 来自被移植项目的依赖，许可见该子项目自带的声明 |
+| 上游项目 | 极简语音输入法 Minimal Voice IME，作者 **@科技小辛** |
+| 许可 | **MIT** — Copyright (c) 2026 科技小辛（许可全文见本节末） |
+| 获取途径 | 作者主页：[微博](https://weibo.com/1595443924) · [抖音](https://www.douyin.com/user/MS4wLjABAAAA9SV_GSD6dDUM8BJqVdW4z3nBAEWc1Xo2q_Jr2WzG-uk) · [小红书](https://www.xiaohongshu.com/user/profile/5cd95d1e0000000011015d9c) |
+| 本项目使用方式 | 仅移植其 **HTTP 上传识别** 一条链路（`app/voice/HttpAsrEngine.kt`、`app/voice/AudioRecorder.kt`）到本项目 Kotlin 外壳；本地 sherpa-onnx 模型、流式中间结果、蓝牙 SCO、口语整理均未使用 |
+| 上游源码 | **不随本仓库分发**。本机留有一份副本仅作参考，本仓库不含其任何源文件 |
 
-> MIT 允许闭源集成，但须保留版权与许可声明。
-> 该子项目保留了完整的 `.gitattributes` / `.gitignore` / `LICENSE` / `CHANGELOG.md`。
+> MIT 允许闭源集成，但须保留版权与许可声明，所以本节直接附上许可全文。
+> 上游项目自带的 `.gitattributes` / `.gitignore` / `LICENSE` / `CHANGELOG.md` 未随本仓库保留；
+> 其中的原生库（`libsherpa-onnx-*.so`、`libonnxruntime.so`、`libllm.so`）也**没有**进入本项目的 APK，
+> 本项目 APK 里的 `libonnxruntime.so` 来自第 4 节的 ONNX Runtime 依赖。
+
+上游许可全文：
+
+```
+MIT License
+
+Copyright (c) 2026 科技小辛
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## 4. 运行时依赖（通过 Gradle 拉取，不随源码分发）
 
 | 组件 | 许可 | 用途 |
 |---|---|---|
 | [ONNX Runtime for Android](https://github.com/microsoft/onnxruntime) | MIT | 端侧重排模型的推理运行时（全量版 `onnxruntime-android`） |
-| [OkHttp](https://github.com/square/okhttp) | Apache-2.0 | 云端联想 / 语音上传的 HTTP 客户端 |
-| [Gson](https://github.com/google/gson) | Apache-2.0 | 仅在 vendored 语音子项目内使用 |
+
+> 端上的 HTTP 请求走 JDK 自带的 `HttpURLConnection`，JSON 用引擎层自己的 `MiniJson`，
+> 没有引入 OkHttp / Gson 等第三方客户端库。
 
 ## 5. 服务端依赖（不在源码分发范围内）
 
@@ -69,5 +99,5 @@
 - **本项目本体**：GPL-3.0
 - **分发的词库数据**：来自 rime-ice，GPL-3.0（→ 决定了本项目许可）
 - **端侧重排模型权重**：Apache-2.0（可闭源商用，署名随包）
-- **内嵌语音子项目**：MIT
+- **移植的语音识别链路**：来自 @科技小辛 的 MIT 项目（上游源码不随仓库分发）
 - **云端模型**：按服务条款使用，本仓库不分发其任何权重或密钥
