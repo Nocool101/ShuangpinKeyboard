@@ -1179,12 +1179,36 @@ class ShuangpinImeService : InputMethodService() {
         if (cloudBoost.isEmpty()) return items
         if (cloudBoostPinyin != session.pinyin) return items
         val boosted = Candidates.promote(cloudBoost, items)
-        // 云端把别的候选提上来时，**用户自学习词和整串精确命中仍然留在最前面**——
-        // 「我打过的词」「这一串本身就是个词」是硬信号，
-        // 云端的推测再准也不该压过它。
-        val kept = boosted.filter { it.kind == CandidateKind.USER || it.exact }
-        val rest = boosted.filter { it.kind != CandidateKind.USER && !it.exact }
+        // 云端把别的候选提上来时，三类「硬信号」仍然留在最前面——
+        // 「我打过的词」「这是纠错出来的」「这一串本身就是个词」。
+        // 云端的推测再准也不该压过它们。
+        //
+        // **次序固定为：用户词 → 纠错候选 → 精确命中。**
+        // 纠错候选必须在精确命中之前：打错的那串拼音在词库里常常也有命中
+        // （打错成另一个冷门词），那个命中恰恰是「错」的证据——
+        // 压住纠错候选就等于白纠了（空格上屏的是第一条）。
+        //
+        // 放在 `kept` 里按固定次序排，而不是跟着 `boosted` 走：
+        // 云端的 promote 会重排它点名的候选，不能让它把硬信号的次序打乱。
+        val kept = boosted
+            .filter { it.kind == CandidateKind.USER || it.kind == CandidateKind.CORRECTION || it.exact }
+            .sortedBy { hardSignalRank(it) }
+        val rest = boosted.filter {
+            it.kind != CandidateKind.USER && it.kind != CandidateKind.CORRECTION && !it.exact
+        }
         return kept + rest
+    }
+
+    /**
+     * 硬信号在候选栏里的固定次序：用户词 → 纠错候选 → 精确命中。
+     *
+     * 数字越小越靠前。其它候选都是 3（跟着云端/重排的结果走）。
+     */
+    private fun hardSignalRank(item: Candidate): Int = when {
+        item.kind == CandidateKind.USER -> 0
+        item.kind == CandidateKind.CORRECTION -> 1
+        item.exact -> 2
+        else -> 3
     }
 
     /**

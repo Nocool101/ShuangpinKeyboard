@@ -511,8 +511,8 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             Mode.PUNCTUATION -> layoutPunctuation(pad, gap, rowGap, letterH)
         }
 
-        // 单手模式：低频的 123 / 符 挪到留白区那一列，
-        // 底栏就全留给「中/英 + 空格 + 退格」了。
+        // 单手模式：留白区那一列放常用标点（贴着屏幕远端），
+        // 全键盘模式没有留白区，常用标点靠数字面板左列的「符号」键。
         if (oneHand) layoutSideColumn(gap, bottomH)
         // 数字面板**不要底栏**——它右列自带 退格/空格/确认（跟参考图一样）
         if (mode != Mode.NUMBER) {
@@ -573,9 +573,8 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
      * 那个键就多余了（用户反馈「左侧语音按键改为常用标点」）。
      *
      * 从上到下排 ，。？！；： —— 点一下直接上屏。
-     * 整个标点面板还在底栏的「符」键里（那边字更全）。
-     *
-     * 全键盘模式没有留白区，标点走底栏的「符」键。
+     * 整个标点面板在**数字面板左列的「符号」键**里（那边字更全）：
+     * 底栏的「符」键已经拿掉（用户反馈底栏太挤，容易误触）。
      *
      * **这一列贴着屏幕的远端**（右手模式贴左，左手模式贴右）：
      * 键盘本体缩到拇指那一侧之后，中间空出来一大条，
@@ -620,7 +619,9 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         // 那是右手拇指最舒服的位置，也是全键盘模式下动作键的位置。
         val items = when (mode) {
             Mode.CHINESE, Mode.ENGLISH -> listOf(
-                BottomKey("mode_punct", "符", Kind.MODE),
+                // **底栏不放「符」键**：用户反馈底栏挤了六个键，
+                // 手指不好找，而且「符」这个低频键把左边塞得满满当当。
+                // 标点面板从**数字面板左列的「符号」键**进，功能没丢。
                 BottomKey("mode_number", "123", Kind.MODE),
                 BottomKey("mode_english", "中/英", Kind.MODE),
                 BottomKey("space", "空格", Kind.SPACE),
@@ -646,19 +647,31 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             )
         }
 
+        // 退格键与动作键之间**留一段空隙**。
+        //
+        // 这俩挨着的时候，手指点退格很容易滑到旁边的「换行/发送」——
+        // 一次误触就发出一条消息、或者多打一个换行，
+        // 后果比打错字严重得多（用户反馈过）。
+        // 给它们之间留出 4 倍于普通键缝的空隙，物理上就不容易连着点。
+        val sep = dp(if (oneHand) 10f else 16f)
+
         // 宽度分配：空格要宽，但动作键不能太窄（它是常用键）
         //
         // ⚠ **单手模式下功能键必须跟着缩**：整块键盘只有 60% 宽了，
-        // 六个键还按原来的宽度排，最后一个键会顶出屏幕右边（右手模式）。
+        // 键还按原来的宽度排，最后一个键会顶出屏幕右边（右手模式）。
         // 「中/英」是三个字，缩太窄字装不下，给它单独一档宽度（比例 1.5）。
         val others = items.size - 1
-        val avail = blockWidth - pad * 2 - gap * (items.size - 1)
+        val avail = blockWidth - pad * 2 - gap * (items.size - 1) - sep
         val cjkCount = items.count { it.id == "mode_english" }
         val cjkRatio = if (oneHand) 1.5f else 1.0f
+        // 这一排是「密排」的一档：键窄一点，空格宽一点。
+        // 判据用「是不是文字面板的底栏」，**不用键数**——
+        // 拿掉「符」之后键数变了，按键数判会把键放大一档，版面就跟着变了。
+        val compact = mode == Mode.CHINESE || mode == Mode.ENGLISH
         var otherW = dp(
             when {
                 oneHand -> 26f
-                items.size >= 6 -> 40f
+                compact -> 40f
                 else -> 48f
             }
         )
@@ -697,6 +710,8 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 kind = item.kind,
             )
             x += w + gap
+            // 退格键后面多留一段空隙，把动作键推开（见上面 sep 的说明）
+            if (item.kind == Kind.BACKSPACE) x += sep
         }
     }
 

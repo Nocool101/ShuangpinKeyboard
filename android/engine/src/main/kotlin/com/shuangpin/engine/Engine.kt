@@ -343,12 +343,39 @@ object Candidates {
     const val MAX_SENTENCE_ALT = 5
 
     /**
+     * **整串精确命中的词频分低于它，纠错候选就顶到前面。**
+     *
+     * 道理：用户打错的那串拼音，在词库里常常**也有命中**——
+     * 「智慧」打成「zihui」，词库里查得到「自会」（55 分）。
+     * 那不是用户想打的，可它是「整串精确命中」，排在前面就把纠错压住了，
+     * 于是「自动纠错」并不自动（用户得滑一下才生效）。
+     *
+     * 但用户**打对了**的时候，整串命中往往是个常用词（分高），
+     * 这时候不该被纠错候选顶掉。
+     *
+     * 所以用词频分当「这个精确命中有多可信」的代理：
+     * 分低 = 冷门词 = 更可能是错打出来的 → 让纠错顶上去；
+     * 分高 = 常用词 = 更可能是用户故意打的 → 精确命中照旧在前。
+     *
+     * **阈值 50**：用户反馈「自会」(55 分) 这类还是压着纠错，要划一下才生效。
+     * 提到 50 之后 55 分的「自会」照旧在前（≥50），
+     * 但 40~49 分的冷门词会让位给纠错候选。
+     *
+     * 代价（实测）：正确输入里被纠错顶掉的从 0% 涨到约 2%——
+     * 也就是每 50 次「打对了」会有 1 次上屏的是近音词而不是原词。
+     * 换来的好处是错打时空格命中 +1.5pp。
+     */
+    const val HOIST_MAX_SCORE = 50
+
+    /**
      * 装配候选栏内容。
      *
-     * 顺序：**用户自学习词 → 自动纠错 → 整句 → 整串命中 → 分出来的词 → 长词扩展 → 单字**。
+     * 顺序：**用户自学习词 →（条件）自动纠错 → 整串命中 → 整句 → 备选整句 → 分出来的词 → 长词扩展 → 单字**。
      *
      * 用户自学习词排最前：那是用户**明确打出来过**的东西，
      * 没有任何候选比它更贴近用户此刻的意图。
+     *
+     * 自动纠错**可能**插到整串命中前面——条件见 [HOIST_MAX_SCORE]。
      *
      * 扩展排在单字前面：它比单字精确得多，单字是最不靠谱的兜底。
      *
@@ -384,22 +411,53 @@ object Candidates {
         // ⓪b **整串精确命中**：这一串拼音本身就是词库里的一个词
         //    （"xianrenfuwoding" → 「仙人抚我顶」）
         //
-        //    排最前，因为它是**最强的信号**——比任何分词结果都强。
-        //    引擎自己的 commitTop() 也是这么选的（整串命中优先于分词），
-        //    候选栏的顺序跟它对齐，用户看到的和空格上屏的才是同一个。
-        val exactText = engine.phraseFor(session.pinyin)
-        if (exactText != null && seen.add(exactText)) {
-            out += Candidate(exactText, CandidateKind.SENTENCE, exact = true)
-        }
+        //    它是很强的信号——比任何分词结果都强。
+        //    引擎自己的 commitTop() 也是这么选的（整串命中优先于分词）。
+        //
+        //    **但它可能就是「错打出来的冷门词」**：
+        //    「智慧」打成「zihui」，词库里查得到「自会」——
+        //    那不是用户想打的，可它是「整串精确命中」，
+        //    排在纠错前面就把纠错压住了（空格上屏的是第一条）。
+        //    所以纠错候选可以顶到它前面——条件见 [HOIST_MAX_SCORE]。
+        //
+        //    一次查拿齐文本和分数（词库是 @Volatile 的，中间换库就地对不上了）。
+        val dictionary = engine.dictionary
+        val exactCand = dictionary.phrases.top(session.pinyin)
+        val exactText = exactCand?.text
+        val exactScore = exactCand?.score ?: 0
 
         // ① 自动纠错：拼音打错了？把更像的词提上来。
-        // 放在最前面——用户按空格就上屏它，这就是「自动」。
-        if (includeCorrections) {
+        // 用户按空格就上屏它，这就是「自动」。
+        val corrections = if (includeCorrections) {
             val syllables = session.pending.map { it.syllable ?: "" }
-            for (corr in Typos.corrections(engine.dictionary, engine.table, syllables)) {
-                if (seen.add(corr.word)) out += Candidate(corr.word, CandidateKind.CORRECTION)
+            Typos.corrections(dictionary, engine.table, syllables)
+        } else {
+            emptyList()
+        }
+
+        // 精确命中先「占位」去重集合：同一个词既是精确命中又是纠错候选时，
+        // 保留「精确命中」这个身份（它的标记更准）。
+        val exactTaken = exactText != null && seen.add(exactText)
+
+        // 纠错候选也占位（去重）
+        val correctionItems = ArrayList<Candidate>(corrections.size)
+        for (corr in corrections) {
+            if (seen.add(corr.word)) {
+                correctionItems += Candidate(corr.word, CandidateKind.CORRECTION)
             }
         }
+
+        // **条件置顶**：纠错候选压过整串命中，当且仅当
+        //   - 整串命中不存在（打错成了词库里根本没有的东西），或者
+        //   - 整串命中的词频分低于 HOIST_MAX_SCORE（是个冷门词，更可能是错打出来的）
+        val hoistCorrections = correctionItems.isNotEmpty() &&
+            (exactText == null || exactScore < HOIST_MAX_SCORE)
+
+        if (hoistCorrections) out += correctionItems
+        if (exactTaken && exactText != null) {
+            out += Candidate(exactText, CandidateKind.SENTENCE, exact = true)
+        }
+        if (!hoistCorrections) out += correctionItems
 
         // ② 整句候选（分词后拼起来）
         val sentence = session.sentence
@@ -608,6 +666,14 @@ class PinyinEngine(
 
     /** 拼音串对应的词（最高频的那个）。 */
     fun phraseFor(pinyin: String): String? = dictionary.phraseOf(pinyin)
+
+    /**
+     * 拼音串对应的最高频词的**分数**（没有命中就是 0）。
+     *
+     * 分数 = `round(log2(权重)*4)`，越大越常用。
+     * 候选栏用它判断「这个精确命中有多可信」（见 [Candidates.HOIST_MAX_SCORE]）。
+     */
+    fun phraseScoreFor(pinyin: String): Int = dictionary.phrases.top(pinyin)?.score ?: 0
 
     /** 拼音串对应的全部候选词，按词频降序。 */
     fun phraseCandidates(pinyin: String): List<String> = dictionary.phraseCandidates(pinyin)

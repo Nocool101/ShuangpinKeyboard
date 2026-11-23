@@ -1,0 +1,301 @@
+# 纠错评测集
+#
+# 格式：错打音节(空格分隔)<TAB>正确词<TAB>错误类型
+# 错误类型：near-initial | near-final | final-slip | initial-slip | negative
+#   near-initial 声母打错但落在近音组（z/zh、c/ch、s/sh…）
+#   near-final   韵母打错但落在近音组（an/ang、en/eng…）
+#   final-slip   韵母按错键，同声母换韵母且不与近韵母组重合
+#   initial-slip 声母按错键，不在任何近音组里（当前规则认不出来，是已知盲区）
+#   negative     正确输入，用来量误报率
+#
+# 音节用空格分隔是为了避免「同一个拼音串有多种切法」的歧义。
+mu ni fei	慕尼黑	near-initial
+shang na bian	山那边	near-final
+kao nv	考虑	near-initial
+shen mu ni	神木丽	near-initial
+cha xia qu	查下去	negative
+chang bian	场边	negative
+hang jing dian	防静电	near-initial
+tuo san	妥善	near-initial
+na kai	扭开	final-slip
+dang ce gong	挡车工	near-initial
+su nv	速率	near-initial
+mang hua	漫画	near-final
+ji zhuang wan	急转弯	near-final
+chi xi	吃相	final-slip
+nao huo de	恼火的	negative
+hu men zheng	虎门镇	near-final
+leng ling qi	冷凝器	near-initial
+kan dao li	看到你	near-initial
+fen xi ta	分系统	final-slip
+yu ne qu	娱乐区	near-initial
+da ma ni	大马力	near-initial
+wei zhong ya	为重要	final-slip
+wei niang	伪娘	negative
+he bu	呵护	initial-slip
+zhu ni jun	主力军	near-initial
+xue ne	学了	near-initial
+er ka	而哭	final-slip
+yong fu la	永福路	final-slip
+zhai chun tian	在春天	near-initial
+lian qing hua	年轻化	near-initial
+wei si ji	威士忌	near-initial
+san ni he	三里河	near-initial
+qi nan shi	期满时	near-initial
+si xian	实现	near-initial
+cui chui de	脆脆的	near-initial
+song hua jiang	松花江	negative
+guan hua xue	光化学	near-final
+san hai jing	山海经	near-initial
+lou ban	楼兰	initial-slip
+zhi ban dao	只占到	initial-slip
+cui yin jie	崔英杰	near-final
+quan ming xin	全明星	near-final
+wang zhuan	网状	near-final
+qi min	起名	near-final
+qiong zui	穷追	near-initial
+xin weng chu	新闻处	near-final
+you nv bie	有区别	initial-slip
+yang seng tang	养生堂	near-initial
+men sui	梦碎	near-final
+he zhuo shang	合作商	near-initial
+nei shao nv	美少女	near-initial
+pi shan	披上	near-final
+guo zai	过载	negative
+zhuan ji	钻机	near-initial
+jin ling	金陵	negative
+nan chen san	男衬衫	near-initial
+tian jian	天将	near-final
+diao xia	掉下	negative
+xiang xia kan	向下看	negative
+zang song	葬送	negative
+nin xuan	遴选	near-initial
+lan tong bao	男同胞	near-initial
+cheng zeng bi	成正比	near-initial
+fa dian chan	发电厂	near-final
+xing ha lu	性贿赂	final-slip
+wo guan	我管	negative
+si shang gan	时尚感	near-initial
+que zheng zhe	确诊者	near-final
+shu shi ya	数十亿	final-slip
+jian si	剪碎	final-slip
+ha jia zi	花架子	final-slip
+ben zan	本站	near-initial
+da zhuang kuai	打砖块	near-final
+shi yin pin	视音频	negative
+da niu	斗牛	final-slip
+wang sha zou	往上走	final-slip
+ji ge nv	及格率	near-initial
+bi wang le	遗忘了	initial-slip
+zhong tuo	重托	negative
+dong bu	同步	initial-slip
+ma xue	墓穴	final-slip
+fu can	扶残	negative
+bu nai en	布莱恩	near-initial
+bian dui	便对	negative
+zhong fan	中方	near-final
+tian shi si	甜丝丝	near-initial
+tai jin ne	太近了	near-initial
+gang zao qi	干燥器	near-final
+pen hu qu	棚户区	near-final
+bai feng dian	百分点	near-final
+ha bu shang	画布上	final-slip
+han jia	行家	near-final
+li bu	你不	near-initial
+shi yong fei	使用费	negative
+ji zai ci	将再次	final-slip
+nei xiang xing	内向型	negative
+mu qiang	目前	near-final
+ha man yi	很满意	final-slip
+lian huang hua	连环画	near-final
+ga bie le	告别了	final-slip
+chen shu yu	成书于	near-final
+si hui yan	石灰岩	near-initial
+shen bi	身体	initial-slip
+dou chu xian	都出现	negative
+he ni	和你	negative
+wei ha	违法	near-initial
+yang xiu	杨修	negative
+fa gei wa	发给我	final-slip
+pang gu	盘古	near-final
+you zi yu	有志于	near-initial
+zhai yuan fang	在远方	near-initial
+duan lai	断奶	near-initial
+qi fu ni	欺负你	negative
+xian hu	仙湖	negative
+guo ya	国有	final-slip
+dan yuan fa	单元房	final-slip
+fang zuo bi	反作弊	near-final
+xi yi	现已	final-slip
+zha dian fang	钟点房	final-slip
+yao xian	要想	near-final
+gei wo ba	给我吧	negative
+yin xiong	英雄	near-final
+ma guo meng	美国梦	final-slip
+yue du zhe	阅读者	negative
+sheng hu	胜负	near-initial
+ke yang yuan	科研院	near-final
+zheng si	正式	near-initial
+chan ting	常听	near-final
+zai tai shan	在台上	near-final
+dou feng	豆粉	near-final
+tuan zong zi	团总支	near-initial
+ta zheng qian	调整前	final-slip
+xiao mang yao	小蛮腰	near-final
+chu yan	粗盐	near-initial
+chuang ei na	传给你	final-slip
+ying hua zi	硬化纸	near-initial
+you chuang yi	有创意	negative
+men long	猛龙	near-final
+zhuo che qu	坐车去	near-initial
+pu nang ke	普朗克	near-initial
+ai ba	艾莎	initial-slip
+dong ce	东侧	negative
+tian leng ne	天冷了	near-initial
+xue shuo	学说	negative
+yi lan te	伊兰特	negative
+xian xu	先序	negative
+bi cu	逼出	near-initial
+yu mi ba	玉米饼	final-slip
+yao bu niao	要不了	near-initial
+he ji	合集	negative
+que la	缺了	final-slip
+shu yin	树荫	negative
+peng hua	盆花	near-final
+ya nie zi	用镊子	final-slip
+nei xiao	媚笑	near-initial
+chong ya jiang	冲压件	near-final
+shou yi ma	受益面	final-slip
+gen fen duo	跟很多	near-initial
+ha shang	和尚	final-slip
+tong zhang	通胀	negative
+ye zong	也总	negative
+gou da zhao	够得着	final-slip
+seng zhong	僧众	negative
+ha gong lei	化工类	final-slip
+leng shui	冷水	negative
+fang zhou zi	方舟子	negative
+hai dui	海归	initial-slip
+dou neng kan	都能看	negative
+hang pian	防骗	near-initial
+yi pin	一瓶	near-final
+yi bian ka	一边看	final-slip
+duo zuan	多赚	near-initial
+shuan zi zuo	双子座	near-final
+gao zhong si	高中时	near-initial
+shu xue zu	数学组	negative
+wa dian hua	我电话	final-slip
+ga lao	更老	final-slip
+xi che	新车	final-slip
+liang zha qian	两周前	final-slip
+nin da	琳达	near-initial
+zhuang chu	转出	near-final
+ta hen xi	他很想	final-slip
+pin lu	平路	near-final
+zai dan nian	在当年	near-final
+ling xie	凝血	near-initial
+zhen luan	真乱	negative
+fei cang zhi	非常之	near-initial
+hang jia	寒假	near-final
+shu nv wei	数据位	initial-slip
+tuo ke	脱壳	negative
+ying ye	营业	negative
+xuan chuan bu	宣传部	negative
+she ze	色泽	near-initial
+dan hong su	胆红素	negative
+ling nong	林农	near-final
+xiao duo wu	小错误	initial-slip
+xuan chuang yue	宣传月	near-final
+a ba	啊不	final-slip
+zong fa	重罚	near-initial
+bo sun	磨损	initial-slip
+yao ning bai	要明白	near-initial
+xin si nu	新思路	near-initial
+shao zhuo	烧灼	negative
+niang zi ya	姜子牙	initial-slip
+deng nv	等去	initial-slip
+sha jia ba	沙家浜	final-slip
+ma dian	盲点	final-slip
+du hu gu	渡虎谷	negative
+zhua dian xing	抓典型	negative
+chen dui de	成堆的	near-final
+chen yun hui	城运会	near-final
+bei ha kuan	被罚款	near-initial
+jiu chi	就吃	negative
+niu yi si	刘易斯	near-initial
+bing tu	倾吐	initial-slip
+wei jun zi	伪君子	negative
+yu shen huo	与生活	near-final
+chong jiang suan	葱姜蒜	near-initial
+xi shen pin	牺牲品	near-final
+shi zi nin	狮子林	near-initial
+fei gong nen	肺功能	near-final
+bang nei	账内	initial-slip
+zeng jiu	拯救	near-initial
+ke nai	可买	near-initial
+guang nu	光路	near-initial
+bao xiang ka	保险卡	near-final
+bing qi da	名气大	initial-slip
+ge lu	各路	negative
+lai bao ta	来找他	initial-slip
+nuo ni	罗尼	near-initial
+ji shi miao	几十秒	negative
+jian zi	尖子	negative
+pen de	碰的	near-final
+jia ju xie	寄居蟹	final-slip
+yan xu xin	延续性	near-final
+chao dao xin	超导性	near-final
+bu zhi ning	不知名	near-initial
+xian chu lai	想出来	near-final
+nan ji gong	男技工	negative
+dang cheng	单程	near-final
+pa xia ne	趴下了	near-initial
+di wu nei	第五类	near-initial
+zai mou ge	在某个	negative
+niu ne	牛了	near-initial
+wang fan	汪涵	near-initial
+xi nuo	奚落	near-initial
+bang fa ba	办法吧	near-final
+you shi ge	有四个	near-initial
+tui jiang zhi	推荐值	near-final
+chuang kou qia	窗口期	final-slip
+tu kuan	图框	near-final
+qin dao fu	清道夫	near-final
+qing jin lai	请进来	negative
+nuo bo	萝卜	near-initial
+ye ga lai	也过来	final-slip
+wo fan xia	我放下	near-final
+qing wa chao	清王朝	final-slip
+shi zi fen	狮子峰	near-final
+ba wo meng	把我们	near-final
+zhui zui	惴惴	near-initial
+zai qian	在前	negative
+za shan	砸伤	near-final
+shuo yao qiu	所要求	near-initial
+qin gan xing	情感性	near-final
+chong ding	吃定	final-slip
+qia bu qiang	气步枪	final-slip
+ke biao	科教	initial-slip
+hao ta	好甜	final-slip
+zhuang quan	转圈	near-final
+chi ji ji	持积极	negative
+lang wang	狼王	negative
+zi zhu fan	自住房	near-final
+zuo zheng	坐镇	near-final
+shan fan	商贩	near-final
+zhai guo nei	在国内	near-initial
+dun jian	轮奸	initial-slip
+ge zhi neng	各职能	negative
+zeng di	征地	near-initial
+bang di	班底	near-final
+ya liang lv	优良率	final-slip
+gang shuo	敢说	near-final
+nai guai	卖乖	near-initial
+tai wei qu	太委屈	negative
+yi kong zi	以控制	near-initial
+nao biao	老表	near-initial
+xiao jiu zhi	小舅子	near-initial
+quan zu	圈住	near-initial
+xiao yin qi	消音器	negative
+nao ji	牢记	near-initial
+man wa	蛮王	final-slip

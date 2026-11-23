@@ -66,4 +66,47 @@ class DictionaryLoadBenchmark {
         // Android 会直接杀掉输入法进程。这里必须守住紧凑存储的收益。
         assertTrue("词库堆占用过大：${"%.1f".format(heapMb)} MB", heapMb < 80)
     }
+
+    /**
+     * **自动纠错的耗时**。
+     *
+     * 纠错是**每次按键**都在主线程跑的（`Candidates.build(includeCorrections = true)`），
+     * 所以它的开销必须小到用户感觉不出来。
+     *
+     * 用最重的一条路径量：5 个音节、且错打串在词库里查无此词
+     * （宽规则全开，每个音节要试二十多个韵母变体 → 上百次词库二分查找）。
+     */
+    @Test
+    fun `测量自动纠错的耗时`() {
+        val engine = TestData.engine()
+        val session = InputSession(engine)
+        // 「仙人抚我顶」——5 个音节，错打成查无此词的串，宽规则全开
+        for (syl in listOf("xian", "ri", "fu", "wo", "ding")) {
+            for (ch in engine.encode(syl)) session.pressKey(ch.toString())
+        }
+
+        // 热身：把类加载与 JIT 的开销算在前面
+        repeat(50) { Candidates.build(engine, session, includeCorrections = true) }
+
+        val n = 200
+        var t0 = System.nanoTime()
+        repeat(n) { Candidates.build(engine, session, includeCorrections = false) }
+        val withoutMs = (System.nanoTime() - t0) / 1_000_000.0 / n
+
+        t0 = System.nanoTime()
+        repeat(n) { Candidates.build(engine, session, includeCorrections = true) }
+        val withMs = (System.nanoTime() - t0) / 1_000_000.0 / n
+
+        val deltaMs = withMs - withoutMs
+        println(
+            "[bench] 候选装配（5 音节）：不含纠错 ${"%.2f".format(withoutMs)} ms，" +
+                "含纠错 ${"%.2f".format(withMs)} ms，增量 ${"%.2f".format(deltaMs)} ms",
+        )
+
+        // 纠错是每次按键都跑的增量成本：必须远小于一帧（16 ms），5 ms 是保守上限
+        assertTrue(
+            "纠错的增量耗时太大：${"%.2f".format(deltaMs)} ms",
+            deltaMs < 5.0,
+        )
+    }
 }

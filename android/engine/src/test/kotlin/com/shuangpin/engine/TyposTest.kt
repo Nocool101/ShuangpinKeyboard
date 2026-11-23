@@ -104,4 +104,63 @@ class TyposTest {
     fun `空输入没有纠错候选`() {
         assertTrue(corrections().isEmpty())
     }
+
+    // ------------------------------------------------------------------
+    // 档位：近音组优先，宽规则靠后
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `近音组变体档位是 0 宽规则变体档位是 1`() {
+        // 「ri」的近音组变体（l↔n 那组之外，近音组里 r↔l）
+        val near = Typos.tieredAlternatives(engine.table, "ri", wide = false)
+        assertTrue("近音组应该有变体，实际 $near", near.isNotEmpty())
+        assertTrue("近音组变体档位都该是 0，实际 $near", near.all { it.tier == Typos.TIER_NEAR })
+
+        // 宽规则多出来的「ren」是档位 1
+        val wide = Typos.tieredAlternatives(engine.table, "ri", wide = true)
+        val ren = wide.firstOrNull { it.syllable == "ren" }
+        assertTrue("宽规则该有 ren，实际 $wide", ren != null)
+        assertEquals("ren 属于宽规则档位", Typos.TIER_WIDE, ren!!.tier)
+    }
+
+    @Test
+    fun `近音组变体排在宽规则变体前面`() {
+        // 「men sui」（打错成「门锁」的音）
+        // 近音组变体 → 「梦碎」(53 分，档位 0)
+        // 宽规则变体 → 「门锁」(64 分，档位 1)
+        // 裸看词频是「门锁」更高，但宽规则更可能是错的 → 排序分 53 vs 52，「梦碎」在前。
+        val c = corrections("men", "sui")
+        assertTrue("应该有纠错候选，实际 $c", c.isNotEmpty())
+        assertEquals("近音组的候选该排第一", "梦碎", c.first().word)
+        assertEquals("第一名的档位是近音组", Typos.TIER_NEAR, c.first().tier)
+        val menSuo = c.firstOrNull { it.word == "门锁" }
+        assertTrue("宽规则的候选也该在表里，实际 $c", menSuo != null)
+        assertEquals("门锁属于宽规则档位", Typos.TIER_WIDE, menSuo!!.tier)
+    }
+
+    @Test
+    fun `纠错候选带着档位出来`() {
+        val c = corrections("men", "sui")
+        assertTrue(c.all { it.tier == Typos.TIER_NEAR || it.tier == Typos.TIER_WIDE })
+    }
+
+    @Test
+    fun `宽档的门槛比近音档高`() {
+        // 宽规则变体只在「额外开着」时用更严的门槛
+        assertEquals("近音档用基础门槛", Typos.SCORE_MARGIN, Typos.marginFor(Typos.TIER_NEAR))
+        assertEquals(
+            "宽档开着的时候门槛更高",
+            Typos.WIDE_MARGIN,
+            Typos.marginFor(Typos.TIER_WIDE, wideAlways = true),
+        )
+        assertTrue(
+            "宽档门槛必须高于近音档",
+            Typos.marginFor(Typos.TIER_WIDE, wideAlways = true) > Typos.marginFor(Typos.TIER_NEAR),
+        )
+        assertEquals(
+            "宽规则没额外开着时沿用基础门槛",
+            Typos.SCORE_MARGIN,
+            Typos.marginFor(Typos.TIER_WIDE, wideAlways = false),
+        )
+    }
 }

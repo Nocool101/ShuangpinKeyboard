@@ -40,6 +40,14 @@ class CandidateTest {
         for (ch in code) session.pressKey(ch.toString())
     }
 
+    /** 打一串音节（自动编成双拼键位）——纠错用例都是按音节写的。 */
+    private fun typeSyllables(vararg syllables: String) {
+        for (syl in syllables) {
+            val code = engine.encode(syl)
+            for (ch in code) session.pressKey(ch.toString())
+        }
+    }
+
     @Test
     fun `空会话没有候选`() {
         assertTrue(Candidates.build(engine, session).isEmpty())
@@ -124,6 +132,49 @@ class CandidateTest {
         }
         // 备选不能和主候选重复
         assertEquals("备选不该与主候选重复", cands.size, cands.map { it.text }.distinct().size)
+    }
+
+    // ---------------------------------------------------------------
+    // 自动纠错：条件置顶
+    // ---------------------------------------------------------------
+
+    @Test
+    fun `错打成词库里没有的东西时纠错候选排第一`() {
+        // 「仙人抚我顶」打成了「xianrifuwoding」——
+        // 错打的那串在词库里根本没有命中，纠错候选理应顶到最前。
+        typeSyllables("xian", "ri", "fu", "wo", "ding")
+        val cands = Candidates.build(engine, session, includeCorrections = true)
+        assertTrue("应该有候选", cands.isNotEmpty())
+        assertEquals("纠错候选该排第一", CandidateKind.CORRECTION, cands.first().kind)
+        assertEquals("第一条就是「仙人抚我顶」", "仙人抚我顶", cands.first().text)
+    }
+
+    @Test
+    fun `精确命中是常用词时纠错候选不顶上去`() {
+        // 「丝线」(57 分) 是常用词 → 用户多半就是故意打的 → 精确命中照旧在前
+        // （57 ≥ HOIST_MAX_SCORE=50，差 7 分，门槛改动也不会翻盘）
+        typeSyllables("si", "xian")
+        val cands = Candidates.build(engine, session, includeCorrections = true)
+        assertEquals("精确命中该排第一", "丝线", cands.first().text)
+        assertTrue("精确命中要带 exact 标记", cands.first().exact)
+        val corr = cands.firstOrNull { it.kind == CandidateKind.CORRECTION }
+        assertTrue("纠错候选也该在候选栏里", corr != null)
+        assertEquals("纠错候选是「实现」", "实现", corr!!.text)
+        assertTrue("纠错候选排在精确命中后面", cands.indexOf(corr) > 0)
+    }
+
+    @Test
+    fun `精确命中是冷门词时纠错候选顶上去`() {
+        // 「可耐」(27 分) 是冷门词 → 更可能是「可来」打错出来的
+        typeSyllables("ke", "nai")
+        val cands = Candidates.build(engine, session, includeCorrections = true)
+        assertEquals("纠错候选该顶到第一", CandidateKind.CORRECTION, cands.first().kind)
+        assertEquals("第一条就是「可来」", "可来", cands.first().text)
+        // 置顶只是换次序，**不删候选**：原精确命中还在栏里
+        assertTrue(
+            "原精确命中不该被丢掉，实际 ${cands.map { it.text }}",
+            cands.any { it.text == "可耐" },
+        )
     }
 
     // ---------------------------------------------------------------
