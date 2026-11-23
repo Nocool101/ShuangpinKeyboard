@@ -18,3 +18,10 @@
 phrases.txt -text
 chars.txt -text
 lm_step.ort binary
+
+# Gradle 包装器脚本：必须是 Unix 换行 + 可执行位。
+# Windows 上没有执行位，git 默认记成 644，Linux checkout 出来就跑不了
+# （CI 报 "Permission denied"，退出码 126）。
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+gradle-wrapper.jar binary

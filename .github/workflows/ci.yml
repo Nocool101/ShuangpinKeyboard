@@ -24,13 +24,19 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # 引擎模块是**纯 JVM**（刻意不依赖 Android SDK），所以这里不用装 SDK，
-      # 也不需要跑 :app —— 只跑引擎的 240 条单测，一分多钟。
+      # 也不需要跑 :app —— 只跑引擎的单测，一分多钟。
       #
-      # 有几条测试要读 D:/tmp/ime-analysis/ 下的评估集文件，
-      # 那些文件不在仓库里 → 用 assumeTrue 跳过，不会误报失败。
+      # 用 `bash ./gradlew` 而不是 `./gradlew`：Windows 上没有执行位，
+      # git 会把 gradlew 记成 644，Linux checkout 出来直接 Permission denied。
+      # 仓库里已经把 gradlew 的模式设成 755，这里再套一层 bash 兜底，
+      # 以后谁在 Windows 上重新 add 了这个文件也不会再把 CI 弄挂。
+      #
+      # 有几条要读 D:/tmp/ime-analysis/ 下评估集的重排测试，
+      # 那些文件不在仓库里 → 用 assumeTrue 跳过，不会误报失败；
+      # 纠错评测集（ime/typo_cases.txt）在仓库里，CI 上照常跑门禁。
       - name: 跑引擎单测
         working-directory: android
-        run: ./gradlew :engine:test --console=plain
+        run: bash ./gradlew :engine:test --console=plain
 
       - name: 上传测试报告
         if: always()
