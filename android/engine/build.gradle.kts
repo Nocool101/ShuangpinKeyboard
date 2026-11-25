@@ -23,6 +23,13 @@ dependencies {
 
 tasks.test {
     useJUnit()
+    // 端侧重排的**模型对比**是按需触发的（要跑几十分钟）：
+    //   gradlew :engine:test --tests '*RerankerCompareTest' \
+    //     -Dshuangpin.rerank.compare=D:/tmp/ime-analysis/model-25M
+    // 不给这个属性，对比用例整个跳过（正常的单测不受影响）。
+    System.getProperty("shuangpin.rerank.compare")?.let {
+        systemProperty("shuangpin.rerank.compare", it)
+    }
     testLogging {
         events("passed", "failed", "skipped")
         showStandardStreams = true

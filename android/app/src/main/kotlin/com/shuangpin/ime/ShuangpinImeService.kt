@@ -24,12 +24,14 @@ import com.shuangpin.engine.ActionKind
 import com.shuangpin.engine.Candidate
 import com.shuangpin.engine.CandidateKind
 import com.shuangpin.engine.Candidates
+import com.shuangpin.engine.Corrections
 import com.shuangpin.engine.CursorMove
 import com.shuangpin.engine.DataLoader
 import com.shuangpin.engine.FileUserDict
 import com.shuangpin.engine.InputSession
 import com.shuangpin.engine.InputStage
 import com.shuangpin.engine.InputSnapshot
+import com.shuangpin.engine.Learning
 import com.shuangpin.engine.LexemeRequest
 import com.shuangpin.engine.NextWords
 import com.shuangpin.engine.PanelPick
@@ -107,6 +109,85 @@ class ShuangpinImeService : InputMethodService() {
      * 云端纠错改写过长度……），按长度删就会「删了个寂寞」。
      */
     private val committedUnits = ArrayDeque<String>()
+
+    /**
+     * 上一块已上屏内容的**拼音**（null = 没有可用的上文）。
+     *
+     * 上下文选词全靠它：
+     * - **跨界组合**：「结」（jie）+「guo」→ 词库里的「结果」→ 该给「果」
+     * - **下一词预测**：刚上屏「结」→ 「果」「婚」这些接下来最可能接的字
+     *
+     * 记的是**拼音**而不是文字：只有拼音能在词库里查。
+     *
+     * 原始字符（英文/数字/标点/空格）会把上下文打断——那不是词，
+     * 拿它去查词库只会查出一堆不相干的东西。
+     */
+    private var lastCommitPinyin: String? = null
+
+    /** 上一块已上屏内容的文字（跟 [lastCommitPinyin] 配对）。 */
+    private var lastCommitText: String? = null
+
+    /**
+     * **本地下一词**（词库给的，不用等云端）。
+     *
+     * 刚上屏「结」，它立刻就能给出「果」「婚」——
+     * 全部来自词库，1 ms 内出结果。
+     * 云端那份到了会补在后面（它更聪明，但要走一次大模型）。
+     */
+    private var localNextWords: List<String> = emptyList()
+
+    /**
+     * **剪贴板里刚复制的那段文字**（null = 没有 / 已经用过了）。
+     *
+     * 用户复制的东西直接摆在候选栏最前面：
+     * 点一下上屏，或者按空格上屏（用户明确要求的）。
+     */
+    private var clipboardText: String? = null
+
+    /** 剪贴板这段是什么时候读到的（跟 [lastCommitStamp] 比新旧）。 */
+    private var clipboardStamp: Long = 0L
+
+    /** 剪贴板这段是不是已经被本输入法上屏过了（用过就不再重复给）。 */
+    private var clipboardUsed: Boolean = false
+
+    /**
+     * **收起剪贴板候选**。
+     *
+     * 剪贴板那块是**一次性**的：上屏一次、退格一次，它就不再占着候选栏最前面。
+     *
+     * 为什么不能一直挂着：它一直在最前面，空格键就一直是「上屏剪贴板」而不是打空格；
+     * 用户想正常打字的时候老是被它拦一下（用户反馈「上屏/按退格一次之后
+     * 就不要再一直显示了」）。
+     *
+     * 收起之后，要等**剪贴板内容变了**（用户又复制了新的）才重新出现。
+     */
+    private fun dismissClipboard() {
+        clipboardUsed = true
+    }
+
+    /** 最近一次上屏的时刻（剪贴板比它新才给）。 */
+    private var lastCommitStamp: Long = 0L
+
+    /**
+     * 剪贴板变化监听：用户在别的应用里复制了东西，切回来就能看到。
+     *
+     * **任何一次「复制」都是一次新的提供**——哪怕复制的内容跟上次一模一样
+     * （用户就是想再用一次），也重新摆出来。
+     */
+    private val clipListener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+        mainHandler.post {
+            val text = readClipboard()
+            if (text == null) {
+                clipboardText = null
+                renderCandidates()
+                return@post
+            }
+            clipboardText = text
+            clipboardUsed = false
+            clipboardStamp = SystemClock.uptimeMillis()
+            renderCandidates()
+        }
+    }
 
     /**
      * 上一次渲染时的拼音串。
@@ -192,6 +273,63 @@ class ShuangpinImeService : InputMethodService() {
      * 停 280 ms 再问，问的才是「他真正在犹豫的那一串」。
      */
     private val cloudDebounce = Runnable { requestCloudDisambiguation() }
+
+    /**
+     * **长句纠错**的结果（后台算出来的，纠正后的整句）。
+     *
+     * 这个计算不便宜（要试几十种近音/错键变体），
+     * **不能挡着打字**——所以放在后台线程跑，停了 250 ms 才启动。
+     */
+    private var asyncCorrections: List<String> = emptyList()
+
+    /** 后台纠错线程。 */
+    private val correctionExecutor = java.util.concurrent.Executors.newSingleThreadExecutor(
+        java.util.concurrent.ThreadFactory { r ->
+            Thread(r, "shuangpin-correction").apply { isDaemon = true }
+        },
+    )
+
+    /** 输入停下来之后再去算长句纠错。 */
+    private val correctionDebounce = Runnable { requestAsyncCorrection() }
+
+    /**
+     * **长句纠错**：后台找出一整句里的错别字。
+     *
+     * 「今天仙人抚我顶」把 ren 打成 ri，整串在词库里查无此词，
+     * 老规则（只纠整串）给不出任何东西——长文档的错别字就是这么来的。
+     *
+     * 这里按**分词结果**找错的那一段（见引擎层 [Corrections]），
+     * 算完把纠正后的整句放进候选栏最前面。
+     *
+     * **在后台跑**：这个计算要试几十种变体，挡着打字会顿。
+     */
+    private fun requestAsyncCorrection() {
+        val syllables = session.pending.map { it.syllable ?: "" }
+        if (syllables.size < 2) return
+        val pinyin = session.pinyin
+        correctionExecutor.execute {
+            val fixed = try {
+                Corrections.forSentence(engine, syllables)
+            } catch (ignored: Throwable) {
+                emptyList()
+            }
+            if (fixed.isEmpty()) return@execute
+            mainHandler.post {
+                // 期间用户又改了输入 → 这个结果过时了，丢掉
+                if (session.pinyin != pinyin) return@post
+                asyncCorrections = fixed
+                renderCandidates()
+            }
+        }
+    }
+
+    /** 输入停下来一点点再算长句纠错（连着打字的时候不算）。 */
+    private fun scheduleAsyncCorrection() {
+        mainHandler.removeCallbacks(correctionDebounce)
+        asyncCorrections = emptyList()
+        if (session.pending.size < 2) return
+        mainHandler.postDelayed(correctionDebounce, CORRECTION_DEBOUNCE_MS)
+    }
 
     /** 模型给出的等长候选顺序（新的在前）。 */
     private var rerankedOrder: List<String> = emptyList()
@@ -362,6 +500,15 @@ class ShuangpinImeService : InputMethodService() {
         }
         reranker.ensureLoaded()
 
+        // 剪贴板：用户在别的应用里复制了东西，切回来候选栏里就有。
+        // （只监听变化，不主动去读——读的动作留给 onStartInput 和变化回调。）
+        try {
+            getSystemService(android.content.ClipboardManager::class.java)
+                ?.addPrimaryClipChangedListener(clipListener)
+        } catch (ignored: Throwable) {
+            // 有些 ROM 不让读剪贴板（隐私限制），读不到就不给这个功能
+        }
+
         // 小数据（键位表+音节表）只有几十 KB，同步加载，键盘立刻可用
         val core = DataLoader().loadCore()
         val scheme = core.schemes[SCHEME_ID] ?: error("缺少方案：$SCHEME_ID")
@@ -387,6 +534,12 @@ class ShuangpinImeService : InputMethodService() {
 
     override fun onDestroy() {
         dictionaryThread?.interrupt()
+        try {
+            getSystemService(android.content.ClipboardManager::class.java)
+                ?.removePrimaryClipChangedListener(clipListener)
+        } catch (ignored: Throwable) {
+            // 同上
+        }
         // 用户词库落盘：服务被杀之前把刚学的词写下去
         userDict?.flush()
         super.onDestroy()
@@ -582,6 +735,8 @@ class ShuangpinImeService : InputMethodService() {
                 // 新一轮输入开始了：上一轮的下一词建议跟这轮没关系，
                 // 留着只会挤占候选栏，还会让人以为那些词是这一轮的候选。
                 resetLexeme()
+                // 长句纠错：停下来一会儿再算（后台线程，不挡打字）
+                scheduleAsyncCorrection()
                 refresh()
                 scheduleCloudDisambiguation()
             }
@@ -754,12 +909,30 @@ class ShuangpinImeService : InputMethodService() {
         undoStack.clear()
         committedText.clear()
         committedUnits.clear()
+        // 上下文（跨界组合 / 下一词）也复位：换输入框就是换上下文。
+        // 剪贴板不算——它跟输入框无关（用户复制的东西切过来照样能用）。
+        lastCommitPinyin = null
+        lastCommitText = null
+        localNextWords = emptyList()
         // 换了一个输入框：上一处的联想一个字都不该带过来
         resetLexeme()
 
         val inputType = info?.inputType ?: 0
         isPasswordField = (inputType and InputType.TYPE_MASK_VARIATION) ==
             InputType.TYPE_TEXT_VARIATION_PASSWORD
+
+        // 读剪贴板（密码框里不给，见下）
+        //
+        // ⚠ **这里不再把它当成「一次新的粘贴机会」**：
+        // 换个输入框就把剪贴板候选放回来，用户用过一次之后切到别的 App
+        // 再切回来它还在（用户反馈「用过一次切换到别的App里候选区的内容还在」）。
+        //
+        // 现在它是**一次性**的：用过（上屏/退格）就收起，
+        // 要等**剪贴板内容变了**（用户又复制了新的）才重新出现。
+        readClipboardInto()
+        // 密码框里**不给剪贴板候选**：密码框的内容不该被剪贴板里的东西污染，
+        // 也不该把剪贴板暴露给录屏（FLAG_SECURE 之外再加一道）。
+        if (isPasswordField) clipboardText = null
 
         // 密码框禁止截屏（截图里会带上输入内容）。
         // 注意：InputMethodService.getWindow() 返回的是 Dialog，真正的 Window 在 Dialog 里。
@@ -811,7 +984,18 @@ class ShuangpinImeService : InputMethodService() {
         // 用户反馈「弹出键盘要在中文输入法界面，不要在上次选择的地方」。
         // （上次停在数字/标点面板的话，再弹出来还是数字面板，
         //   看着像「键盘坏了」，其实是模式没复位。）
-        if (currentMode != ShuangpinKeyboardView.Mode.CHINESE) {
+        //
+        // ⚠ **但「重启输入」不算**：宿主重启输入（restartInput）时
+        // **键盘形态要保住**。
+        //
+        // 电话号码输入框就是这样：很多拨号盘在收到第一个数字后会
+        // 调 `restartInput()`（要重新按号码格式整理一遍），
+        // 于是 `onStartInputView` 又来一次——老代码在这里把模式重置成中文，
+        // 用户的数字键盘**打第一个数字就被弹回文字键盘**，
+        // 必须重新点一次「123」才能接着输入（用户反馈）。
+        //
+        // 所以：**只在不是重启的时候复位模式**。
+        if (!restarting && currentMode != ShuangpinKeyboardView.Mode.CHINESE) {
             currentMode = ShuangpinKeyboardView.Mode.CHINESE
             keyboard?.mode = ShuangpinKeyboardView.Mode.CHINESE
             // rawMode 是从 currentMode 派生的，不用单独改
@@ -1086,14 +1270,16 @@ class ShuangpinImeService : InputMethodService() {
         val hasCandidates = session.pending.isNotEmpty()
         // 上屏之后没有预编辑内容了，但**下一词建议还得显示**——
         // 那正是「用户刚打完一个词，接下来可能想打什么」的用处所在。
-        val hasNext = nextWords.isNotEmpty()
+        val hasNext = nextWords.isNotEmpty() || localNextWords.isNotEmpty()
         val hasCorrection = correctionFixed != null
-        scroll.visibility = if (hasCandidates || hasNext || hasCorrection) {
+        // 剪贴板：刚复制的那段文字摆在最前面
+        val clip = clipboardCandidate()
+        scroll.visibility = if (hasCandidates || hasNext || hasCorrection || clip != null) {
             View.VISIBLE
         } else {
             View.INVISIBLE
         }
-        if (!hasCandidates && !hasNext && !hasCorrection) {
+        if (!hasCandidates && !hasNext && !hasCorrection && clip == null) {
             candidateIndicator?.visibility = View.INVISIBLE
             lastCandidateSig = null
             lastCandidatePinyin = null
@@ -1107,7 +1293,16 @@ class ShuangpinImeService : InputMethodService() {
         // 候选的装配规则在引擎层（Candidates.build）——那里定义的才是
         // 「这个输入法给出什么候选」，端侧模型评估用的是同一份逻辑。
         // 自动纠错候选只在这里打开（评估端默认关，基线才可比）。
-        val items = Candidates.build(engine, session, includeCorrections = true)
+        //
+        // **带上上文**（上一块已上屏的拼音 + 文字）：
+        // 跨界组合靠它选词——「结」+「guo」该给「果」，不是「过」。
+        val items = Candidates.build(
+            engine = engine,
+            session = session,
+            includeCorrections = true,
+            contextPinyin = lastCommitPinyin,
+            contextText = lastCommitText,
+        )
         val ordered = applyRerank(items)
         val boosted = applyCloudBoost(ordered)
         // 纠错候选之间的重排放在最后：它只动纠错候选彼此的次序，
@@ -1115,11 +1310,15 @@ class ShuangpinImeService : InputMethodService() {
         val withCorrRerank = applyCorrectionRerank(boosted)
         val withNext = insertNextWords(withCorrRerank)
         val withCorrection = insertCorrection(withNext)
+        // 后台算出来的长句纠错：纠正后的整句摆最前面
+        val withAsyncCorrection = insertAsyncCorrections(withCorrection)
         // 逐字修改的结果最后套上——重排、联想、纠错都不该把它冲掉
-        val finalItems = applyCharEdit(withCorrection)
+        val finalItems = applyCharEdit(withAsyncCorrection)
         // 画不出来的字不进候选栏（扩展区的字手机字体多半没有字形 → 一片空白）。
         // 放在最后一步：重排/消歧看到的候选池不动，那份池子要和评估端一致。
-        val visibleItems = finalItems.filter { isRenderableText(it.text) }
+        var visibleItems = finalItems.filter { isRenderableText(it.text) }
+        // 剪贴板摆最前面：用户刚复制的东西，点一下（或按空格）就能上屏
+        if (clip != null) visibleItems = listOf(clip) + visibleItems
         val sig = session.pinyin + "|" + visibleItems.joinToString("|") { it.text }
         if (sig == lastCandidateSig) {
             updatePageInfo()
@@ -1191,8 +1390,15 @@ class ShuangpinImeService : InputMethodService() {
         // **整串精确命中也不参与**：模型只见过常用词，
         // "xianrenfuwoding" 这种生僻整词它会给打散成「现任服我定」——
         // 用户明明打对了，候选栏第一却是个胡拼的句子。
-        val protected = items.filter { isCorrectionKind(it.kind) || it.kind == CandidateKind.USER || it.exact }
-        val rest = items.filter { !isCorrectionKind(it.kind) && it.kind != CandidateKind.USER && !it.exact }
+        //
+        // **上下文选出来的也不参与**：那是词库给的硬证据
+        // （"jie"+"guo" → 词库里的「结果」），模型没见过它。
+        val protected = items.filter {
+            isCorrectionKind(it.kind) || it.kind == CandidateKind.USER || it.exact || it.context
+        }
+        val rest = items.filter {
+            !isCorrectionKind(it.kind) && it.kind != CandidateKind.USER && !it.exact && !it.context
+        }
         val order = rerankedOrder
         if (order.isEmpty() || rerankedPinyin != session.pinyin) return protected + rest
         val rank = HashMap<String, Int>()
@@ -1229,24 +1435,29 @@ class ShuangpinImeService : InputMethodService() {
         // 放在 `kept` 里按固定次序排，而不是跟着 `boosted` 走：
         // 云端的 promote 会重排它点名的候选，不能让它把硬信号的次序打乱。
         val kept = boosted
-            .filter { it.kind == CandidateKind.USER || it.kind == CandidateKind.CORRECTION || it.exact }
+            .filter {
+                it.kind == CandidateKind.USER || it.kind == CandidateKind.CORRECTION ||
+                    it.exact || it.context
+            }
             .sortedBy { hardSignalRank(it) }
         val rest = boosted.filter {
-            it.kind != CandidateKind.USER && it.kind != CandidateKind.CORRECTION && !it.exact
+            it.kind != CandidateKind.USER && it.kind != CandidateKind.CORRECTION &&
+                !it.exact && !it.context
         }
         return kept + rest
     }
 
     /**
-     * 硬信号在候选栏里的固定次序：用户词 → 纠错候选 → 精确命中。
+     * 硬信号在候选栏里的固定次序：用户词 → 纠错候选 → 上下文命中 → 精确命中。
      *
-     * 数字越小越靠前。其它候选都是 3（跟着云端/重排的结果走）。
+     * 数字越小越靠前。其它候选都是 4（跟着云端/重排的结果走）。
      */
     private fun hardSignalRank(item: Candidate): Int = when {
         item.kind == CandidateKind.USER -> 0
         item.kind == CandidateKind.CORRECTION -> 1
-        item.exact -> 2
-        else -> 3
+        item.context -> 2
+        item.exact -> 3
+        else -> 4
     }
 
     /**
@@ -1409,6 +1620,28 @@ class ShuangpinImeService : InputMethodService() {
     )
 
     private fun addChip(item: Candidate, isFirst: Boolean) {
+        // 剪贴板：单独画。它不是候选词，是个「刚复制的东西」——
+        // 摆最前面，标成剪贴板的样子（用户一眼知道这不是候选）。
+        if (item.kind == CandidateKind.CLIPBOARD) {
+            val shown = stripUnrenderable(item.text)
+            val label = if (shown.length > CLIPBOARD_DISPLAY_MAX) {
+                shown.take(CLIPBOARD_DISPLAY_MAX) + "…"
+            } else {
+                shown
+            }
+            val tv = TextView(this).apply {
+                text = "📋 $label"
+                textSize = 16f
+                setTextColor(COLOR_CLIPBOARD_TEXT)
+                setPadding(dp(12f).toInt(), dp(4f).toInt(), dp(12f).toInt(), dp(4f).toInt())
+                setBackgroundColor(COLOR_CLIPBOARD_BG)
+                setOnClickListener { commitChip(item) }
+            }
+            candidateBar?.addView(tv)
+            chipHolders += ChipHolder(item, tv, listOf(tv), emptyList(), COLOR_CLIPBOARD_BG, COLOR_CLIPBOARD_TEXT)
+            return
+        }
+
         val syllables = session.pending.map { it.syllable ?: "" }
         // 字数跟音节数一致，才能逐字对上拼音。
         // 长词扩展（「你好吗」对应 2 个音节）之类对不上，就走老样式。
@@ -1521,6 +1754,8 @@ class ShuangpinImeService : InputMethodService() {
 
     /** 候选文字的颜色。 */
     private fun chipTextColor(item: Candidate, isFirst: Boolean): Int = when {
+        // 剪贴板：青色——它不是候选，是个「刚复制的东西」
+        item.kind == CandidateKind.CLIPBOARD -> COLOR_CLIPBOARD_TEXT
         // 第一候选就是「确认键会上屏的那个」，用主候选的样式
         isFirst -> 0xFFA8620A.toInt()
         // 用户自学习词：橙色——「这是你自己打过的」
@@ -1561,6 +1796,8 @@ class ShuangpinImeService : InputMethodService() {
         CandidateKind.EXTENSION, CandidateKind.NEXT_WORD -> 17f
         // 云端整句纠错：一整句话，字号小一档才放得下
         CandidateKind.CORRECTION_TEXT -> 16f
+        // 剪贴板：内容可能很长，小一号才放得下
+        CandidateKind.CLIPBOARD -> 16f
     }
 
     /** 点候选：按候选的类别决定怎么上屏。 */
@@ -1576,9 +1813,57 @@ class ShuangpinImeService : InputMethodService() {
             CandidateKind.CHAR -> commitChar(item.text)
             // 云端整句纠错：把已上屏的那段换掉
             CandidateKind.CORRECTION_TEXT -> applyCorrection()
+            // 剪贴板：整段上屏
+            CandidateKind.CLIPBOARD -> commitClipboard()
+            // 词：可能是整串，也可能只是分词切出来的其中一段。
+            // 后者要**保住后面没选的那半截拼音**（见 commitWordPrefix）。
+            CandidateKind.WORD -> {
+                if (!commitWordPrefix(item.text)) commitText(item.text)
+            }
             // 其余是整条上屏
             else -> commitText(item.text)
         }
+    }
+
+    /**
+     * 候选栏里点了一个**词**时：上屏这个词，**后面没选的那半截拼音留在会话里**。
+     *
+     * 「cangtianzhijian」→ 候选里有「苍天之间」（整句）、还有「苍天」「之间」。
+     * 用户点**前面的**「苍天」：老逻辑整轮输入就结束了，后面那半截「zhijian」
+     * 凭空消失（用户反馈「在候选区选择前面的文字，后面的文字就会消失」）。
+     *
+     * 正确做法：上屏「苍天」，**「zhijian」留在预编辑区里**，
+     * 候选栏接着给「之间」——用户按空格就上屏，不用重新打字。
+     *
+     * 点**后面的**词（「之间」）时，前面没选的那部分不能丢：
+     * 把它一起上屏（用户要的就是「苍天之间」）。
+     *
+     * @return true = 走这条路上屏了；false = 这个词覆盖了整串，按老路上屏
+     */
+    private fun commitWordPrefix(word: String): Boolean {
+        val syllables = session.pending.map { it.syllable ?: "" }
+        if (syllables.isEmpty()) return false
+        // 用**带音节跨度**的分词结果：词库里有「西安」这种一个音节对应两个字的词条，
+        // 按序号数会数错位（用户反馈「选前面的词，后面的字就没了」的根因之一）。
+        val spans = engine.segmentWordSpans(syllables)
+        if (spans.isEmpty()) return false
+        var hit = -1
+        for ((i, span) in spans.withIndex()) {
+            if (span.word == word) {
+                hit = i
+                break
+            }
+        }
+        if (hit < 0) return false
+        val span = spans[hit]
+        // 这一块覆盖到第几个音节（从 0 数）
+        val consumed = span.start + span.count
+        if (consumed <= 0) return false
+        // 上屏的文字 = 它前面的那些词 + 它自己
+        val text = spans.take(hit + 1).joinToString("") { it.word }
+        if (text.isEmpty()) return false
+        commitText(text, consumed = consumed)
+        return true
     }
 
     // ------------------------------------------------------------------
@@ -2189,8 +2474,14 @@ class ShuangpinImeService : InputMethodService() {
      *
      * @param followUp 上屏之后要不要接着问云端（下一词预测 + 整句纠错）。
      *   动作键触发的上屏**不要**：消息都要发出去了，再纠错就晚了。
+     * @param pinyin 这一段文字对应的**拼音**（null = 没有，比如原始字符）。
+     *   它是上下文选词的原料——见 [lastCommitPinyin]。
      */
-    private fun commitToHost(text: String, followUp: Boolean = true) {
+    private fun commitToHost(
+        text: String,
+        followUp: Boolean = true,
+        pinyin: String? = null,
+    ) {
         if (text.isEmpty()) return
         val ic = currentInputConnection ?: return
         // 上屏 = 这一轮输入结束了，选字面板必须收起：
@@ -2200,8 +2491,10 @@ class ShuangpinImeService : InputMethodService() {
         // commitText 会顶掉宿主里的预编辑区；顶不掉的（有些 App 自己实现了 InputConnection）
         // 这里再补一次清理，别让「已上屏」和「预编辑」两份内容并存。
         clearComposing()
-        noteCommitted(text)
+        noteCommitted(text, pinyin)
         pushUndo(text)
+        // 本地下一词：刚上屏这块后面最可能接什么（词库给的，1 ms 内就有）
+        localNextWords = computeLocalNextWords(text, pinyin)
         // 上下文变了，上一轮的下一词建议作废
         nextWords = emptyList()
         // 上一轮的云端消歧同样作废（它对应的是刚才那串拼音）
@@ -2309,7 +2602,8 @@ class ShuangpinImeService : InputMethodService() {
 
     /** 候选栏里现在有没有联想内容（下一词建议，或云端消歧提上来的候选）。 */
     private val hasLexeme: Boolean
-        get() = nextWords.isNotEmpty() || cloudBoost.isNotEmpty() || correctionFixed != null
+        get() = nextWords.isNotEmpty() || localNextWords.isNotEmpty() ||
+            cloudBoost.isNotEmpty() || correctionFixed != null
 
     /**
      * 停掉联想。
@@ -2323,6 +2617,8 @@ class ShuangpinImeService : InputMethodService() {
      */
     private fun resetLexeme() {
         nextWords = emptyList()
+        // 本地下一词也是「上一轮」的，一样作废
+        localNextWords = emptyList()
         cloudBoost = emptyList()
         cloudBoostPinyin = null
         mainHandler.removeCallbacks(cloudDebounce)
@@ -2369,13 +2665,111 @@ class ShuangpinImeService : InputMethodService() {
      *
      * 插在单字前面：下一词是「接下来该打什么」，单字是「这个音节有哪些字」，
      * 前者更该被看见。
+     *
+     * **本地那一份排在云端前面**：本地是词库给的，1 ms 就到；
+     * 云端要走一次大模型（1.4 s 起），慢一拍。
      */
     private fun insertNextWords(items: List<Candidate>): List<Candidate> {
-        if (nextWords.isEmpty()) return items
+        val words = (localNextWords + nextWords).distinct()
+        if (words.isEmpty()) return items
         val at = items.indexOfFirst { it.kind == CandidateKind.CHAR }
             .let { if (it < 0) items.size else it }
-        val next = nextWords.map { Candidate(it, CandidateKind.NEXT_WORD) }
+        val next = words.map { Candidate(it, CandidateKind.NEXT_WORD) }
         return items.toMutableList().apply { addAll(at, next) }
+    }
+
+    /**
+     * **本地下一词**：刚上屏这块后面最可能接什么。
+     *
+     * 全部来自词库：「结」（jie）+下一个音节在词库里查得到什么，
+     * 那个词的尾巴就是下一词（「果」「婚」……）。
+     *
+     * **不用等云端**——云端那份要走一次大模型，1.4 s 起，
+     * 用户看到的是「候选栏空着等了一会儿才冒出来」。
+     */
+    private fun computeLocalNextWords(text: String, pinyin: String?): List<String> {
+        if (pinyin.isNullOrEmpty() || text.isEmpty()) return emptyList()
+        return engine.nextWords(pinyin, text, LOCAL_NEXT_LIMIT)
+    }
+
+    /**
+     * **剪贴板候选**（没有就 null）。
+     *
+     * 摆出来的条件：
+     * - 设置里没关掉这个功能
+     * - 剪贴板里有文字
+     * - 这段还没被本输入法上屏过（用过就不再重复给）
+     * - **比上次上屏新**：用户在上屏之后又复制了新的才给
+     *   （不然「打完一段话按空格」会突然把剪贴板里的东西贴上去）
+     * - 当前没有正在输入的拼音（有拼音时候选栏给的是候选，不是剪贴板）
+     */
+    private fun clipboardCandidate(): Candidate? {
+        val s = settings ?: return null
+        if (!s.clipboardEnabled) return null
+        val text = clipboardText ?: return null
+        if (clipboardUsed) return null
+        if (clipboardStamp <= lastCommitStamp) return null
+        if (session.pending.isNotEmpty()) return null
+        if (stripUnrenderable(text).isEmpty()) return null
+        return Candidate(text, CandidateKind.CLIPBOARD)
+    }
+
+    /** 读剪贴板里的文本（读不到就 null：有些 ROM/宿主不允许）。 */
+    private fun readClipboard(): String? {
+        return try {
+            val cm = getSystemService(android.content.ClipboardManager::class.java) ?: return null
+            val clip = cm.primaryClip ?: return null
+            if (clip.itemCount <= 0) return null
+            val text = clip.getItemAt(0).coerceToText(this)?.toString() ?: return null
+            text.trim().takeIf { it.isNotEmpty() }
+        } catch (ignored: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * 把剪贴板里的文字读进来。
+     *
+     * 读到的内容跟之前不一样才算「新的」——一样的话不更新时间戳，
+     * 否则「剪贴板比上次上屏新」这个判据就失效了。
+     */
+    private fun readClipboardInto() {
+        val text = readClipboard()
+        if (text == null) {
+            clipboardText = null
+            return
+        }
+        if (text != clipboardText) {
+            clipboardText = text
+            clipboardUsed = false
+            clipboardStamp = SystemClock.uptimeMillis()
+        }
+    }
+
+    /** 把剪贴板内容上屏。 */
+    private fun commitClipboard() {
+        val text = clipboardText ?: return
+        if (text.isEmpty()) return
+        clipboardUsed = true
+        val ic = currentInputConnection ?: return
+        clearComposing()
+        ic.commitText(text, 1)
+        noteCommitted(text)
+        pushUndo(text)
+        refresh()
+    }
+
+    /** 这段文字里画不出来的字去掉（剪贴板用：整体不可显示就没法摆）。 */
+    private fun stripUnrenderable(text: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            val ch = String(Character.toChars(cp))
+            if (isRenderable(ch)) sb.append(ch)
+            i += Character.charCount(cp)
+        }
+        return sb.toString()
     }
 
     /**
@@ -2388,6 +2782,26 @@ class ShuangpinImeService : InputMethodService() {
     private fun insertCorrection(items: List<Candidate>): List<Candidate> {
         val fixed = correctionFixed ?: return items
         return items + Candidate(fixed, CandidateKind.CORRECTION_TEXT)
+    }
+
+    /**
+     * 把**后台算出来的长句纠错**插到候选栏**最前面**。
+     *
+     * 跟别的候选不一样：它不是「猜的」，是查词库查出来的
+     * （「今天仙人抚我顶」比「今天西安日服我顶」更说得通）。
+     * 所以它排在最前面，而且不参与端侧重排（模型没见过这种整句）。
+     */
+    private fun insertAsyncCorrections(items: List<Candidate>): List<Candidate> {
+        if (asyncCorrections.isEmpty()) return items
+        val out = ArrayList<Candidate>(items.size + asyncCorrections.size)
+        val existing = items.mapTo(HashSet()) { it.text }
+        for (text in asyncCorrections) {
+            if (text.isEmpty()) continue
+            if (!existing.add(text)) continue
+            out += Candidate(text, CandidateKind.CORRECTION)
+        }
+        out += items
+        return out
     }
 
     /**
@@ -2411,6 +2825,10 @@ class ShuangpinImeService : InputMethodService() {
         clearComposing()
         ic.commitText(text, 1)
         noteCommitted(text)
+        // 原始字符把中文上下文打断了：
+        // 「结」+「，」+「guo」不该再按「结果」来联想。
+        lastCommitPinyin = null
+        lastCommitText = null
         pushUndo(text)
         refresh()
     }
@@ -2427,17 +2845,33 @@ class ShuangpinImeService : InputMethodService() {
      *
      * @param followUp 见 [commitToHost]
      * @param units    要记进词库的「拼音 → 词」；不给就按当前会话推算。
+     * @param consumed 这一段覆盖了**前面几个音节**（>0 = 只提交前半截，
+     *   后面的音节留在会话里继续输入，见 [InputSession.commitPrefix]）。
      */
     private fun commitText(
         text: String,
         followUp: Boolean = true,
         units: List<Pair<String, String>>? = null,
+        consumed: Int = 0,
     ) {
         // 学习必须在会话重置**之前**做：拼音串（session.pinyin）
         // 这时候还在，重置后就没了。
-        learnCommit(text, units)
-        session.commitText(text)
-        commitToHost(text, followUp)
+        val allSyllables = session.pending.map { it.syllable ?: "" }
+        val pinyin = if (consumed > 0) {
+            allSyllables.take(consumed).joinToString("")
+        } else {
+            allSyllables.joinToString("")
+        }
+        val learnUnits = units ?: learningUnits(text, consumed)
+        learnCommit(text, learnUnits)
+        // **组合学习**：上一块 + 这一块 一起记一条（见 learnCombination）
+        learnCombination(pinyin, text)
+        if (consumed > 0) {
+            session.commitPrefix(text, consumed)
+        } else {
+            session.commitText(text)
+        }
+        commitToHost(text, followUp, pinyin)
     }
 
     // ------------------------------------------------------------------
@@ -2468,9 +2902,12 @@ class ShuangpinImeService : InputMethodService() {
      * 按**字与音节一一对齐**来拆：一个音节一个字。
      * 对不齐（比如上屏的是词库里的长词，覆盖的音节数跟字数不一样）就不记——
      * 记错的比不记更糟。
+     *
+     * @param syllableCount 只算**前面几个音节**（提交前缀时用：后面的音节还在会话里）。
      */
-    private fun learningUnits(text: String): List<Pair<String, String>> {
-        val syllables = session.pending.map { it.syllable ?: "" }
+    private fun learningUnits(text: String, syllableCount: Int = 0): List<Pair<String, String>> {
+        val all = session.pending.map { it.syllable ?: "" }
+        val syllables = if (syllableCount in 1..all.size) all.take(syllableCount) else all
         if (syllables.isEmpty() || syllables.size != text.length) return emptyList()
         if (text.length < 2) return emptyList()
         val out = ArrayList<Pair<String, String>>()
@@ -2481,6 +2918,34 @@ class ShuangpinImeService : InputMethodService() {
             if (word.length >= 2 && word != text) out += pinyin to word
         }
         return out
+    }
+
+    /**
+     * **组合学习**：上一块 + 这一块，连起来也记一条。
+     *
+     * 用户先打「天道」，再打「符文」——以后打「tiandaofuwen」，
+     * 候选栏第一个就该是「天道符文」。
+     *
+     * 只在**两块是连着的**时候才学（中间插了空格、标点就不学——
+     * 那种情况下它们本来就是两个词）。
+     *
+     * 还有一条：词库里**已经有**的组合不学。
+     * 「我想」词库里有，学不学都一样；学了反而把词频改了。
+     * 真正要学的是词库里没有的组合——那是用户自己的用法。
+     *
+     * 规则本身在引擎层 [Learning.combination]（纯逻辑，可单测）。
+     */
+    private fun learnCombination(pinyin: String, text: String) {
+        val dict = userDict ?: return
+        val combo = Learning.combination(
+            dictionary = engine.dictionary,
+            prevPinyin = lastCommitPinyin,
+            prevText = lastCommitText,
+            pinyin = pinyin,
+            text = text,
+        ) ?: return
+        dict.learn(combo.first, combo.second)
+        scheduleUserDictFlush()
     }
 
     /**
@@ -2533,8 +2998,9 @@ class ShuangpinImeService : InputMethodService() {
 
     private fun commitChar(ch: String) {
         // 同样统一走 session 里的实现，别在服务层再抄一遍
+        val pinyin = session.pinyin
         val text = session.commitChar(ch)
-        commitToHost(text)
+        commitToHost(text, pinyin = pinyin)
     }
 
     private fun onSpacePressed() {
@@ -2544,7 +3010,18 @@ class ShuangpinImeService : InputMethodService() {
         if (editingSyllable == null && session.pending.isNotEmpty()) {
             if (commitTopCandidate(includeNextWord = false)) return
         }
-        // ③ 没有待上屏的拼音，但候选栏挂着云端给的「下一词」建议
+        // ③ 剪贴板：候选栏最前面那一块就是它 → 空格直接上屏
+        //
+        //    用户的要求：「复制的内容直接显示在候选区，点击空格键可以直接上屏」。
+        //    剪贴板优先于下一词建议——它是用户**刚做的动作**，
+        //    下一词只是猜测。
+        if (editingSyllable == null && session.pending.isEmpty()) {
+            if (clipboardCandidate() != null) {
+                commitClipboard()
+                return
+            }
+        }
+        // ④ 没有待上屏的拼音，但候选栏挂着云端给的「下一词」建议
         //    → 空格上屏它（打完「智慧」再按一下空格 → 「智慧城市」）
         //
         //    这一条以前是「不」的（怕用户想打空格结果把建议词上屏了），
@@ -2554,7 +3031,7 @@ class ShuangpinImeService : InputMethodService() {
         if (editingSyllable == null && session.pending.isEmpty() && nextWords.isNotEmpty()) {
             if (commitTopCandidate(includeNextWord = true)) return
         }
-        // ④ 什么都没有 → 空格就是空格
+        // ⑤ 什么都没有 → 空格就是空格
         //
         // 以前空格只插空格、上屏全靠确认键，代价是「打完一段话要按两下才能上屏」。
         // 现在：有候选时空格就是上屏（滑选了哪条就上哪条，没滑就是第一候选）；
@@ -2669,7 +3146,8 @@ class ShuangpinImeService : InputMethodService() {
             commitText(top, followUp = false)
             return
         }
-        session.commitTop()?.let { commitToHost(it, followUp = false) }
+        val pinyin = session.pinyin
+        session.commitTop()?.let { commitToHost(it, followUp = false, pinyin = pinyin) }
     }
 
     /**
@@ -2683,6 +3161,10 @@ class ShuangpinImeService : InputMethodService() {
         ic.commitText(text, 1)
         session.commitText(text)
         noteCommitted(text)
+        // 下一词建议是模型给的，**没有拼音**——上下文接不上了，清掉。
+        lastCommitPinyin = null
+        lastCommitText = null
+        localNextWords = emptyList()
         pushUndo(text)
         nextWords = emptyList()
         refresh()
@@ -2695,6 +3177,9 @@ class ShuangpinImeService : InputMethodService() {
         if (panelBack()) return
         // 候选要变了，选中的那条也作废
         clearCandidateSelection()
+        // 退格一次就把剪贴板候选收起来——
+        // 它是一次性的，不能一直占着候选栏最前面（用户反馈）。
+        dismissClipboard()
         if (rawMode) {
             // 原始字符是直接上屏的，退格直接删宿主里的一个字
             currentInputConnection?.deleteSurroundingText(1, 0)
@@ -2730,6 +3215,11 @@ class ShuangpinImeService : InputMethodService() {
         if (before != null && before.isEmpty()) {
             // 宿主里光标前面确实没字了：什么也删不掉，
             // 也就别动记账（不然记账跟宿主越差越远）。
+            //
+            // 但**候选区里那块（剪贴板）要收掉**——
+            // 用户就是按退格想把它删掉的（用户反馈「退格删不掉候选区的内容」）。
+            // 以前这里直接 return，候选栏不重画，那块就一直挂在那儿。
+            refresh()
             return
         }
         ic.deleteSurroundingText(1, 0)
@@ -2739,8 +3229,9 @@ class ShuangpinImeService : InputMethodService() {
         // 上文被删光了，联想也就没有依据了
         if (committedText.isEmpty() && hasLexeme) {
             resetLexeme()
-            refresh()
         }
+        // 重画候选栏：剪贴板候选刚被收起（dismissClipboard），要把它撤下去
+        refresh()
     }
 
     // ------------------------------------------------------------------
@@ -2792,6 +3283,10 @@ class ShuangpinImeService : InputMethodService() {
         val ic = currentInputConnection ?: return
         ic.commitText(t, 1)
         noteCommitted(t)
+        // 语音没有拼音，上下文接不上
+        lastCommitPinyin = null
+        lastCommitText = null
+        localNextWords = emptyList()
         pushUndo(t)
         refresh()
     }
@@ -2803,9 +3298,19 @@ class ShuangpinImeService : InputMethodService() {
      * 上滑退格要按词退（退一个上屏单元，而不是一个字一个字退），
      * 就靠这个长度表知道每个单元有多长。
      */
-    private fun noteCommitted(text: String) {
+    private fun noteCommitted(text: String, pinyin: String? = null) {
         committedText.append(text)
         committedUnits.addLast(text)
+        lastCommitStamp = SystemClock.uptimeMillis()
+        // 上屏了就收起剪贴板候选：它是一次性的，不能一直占着候选栏最前面
+        dismissClipboard()
+        // 上下文：只有**中文**（有拼音）才接得上。
+        // 原始字符（英文/数字/标点/空格）把上下文打断了——
+        // 拿半个词去词库里查，出来的都是不相干的东西。
+        if (pinyin != null && pinyin.isNotEmpty() && text.isNotEmpty()) {
+            lastCommitPinyin = pinyin
+            lastCommitText = text
+        }
     }
 
     /**
@@ -2933,6 +3438,8 @@ class ShuangpinImeService : InputMethodService() {
         val target = correctionTarget ?: return
         val fixed = correctionFixed ?: return
         val ic = currentInputConnection ?: return
+        // 改写了宿主里的文字 = 一次「上屏」，剪贴板候选收起来
+        dismissClipboard()
         ic.deleteSurroundingText(target.length, 0)
         ic.commitText(fixed, 1)
         // 上下文也跟着改
@@ -3037,6 +3544,8 @@ class ShuangpinImeService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val before = hostTextBeforeCursorAll() ?: return
         if (before.isEmpty()) return
+        // 删了字 = 一次改动，剪贴板候选收起来
+        dismissClipboard()
         ic.deleteSurroundingText(before.length, 0)
         // 记一笔「插入」，滑下来就能原样恢复
         undoStack.addLast(UndoOp.Insert(before))
@@ -3112,6 +3621,8 @@ class ShuangpinImeService : InputMethodService() {
         ic.deleteSurroundingText(n, 0)
         // 记账跟着削（宿主里真被删掉的那几个字）
         trimCommitted(n)
+        // 删了字 = 一次改动，剪贴板候选收起来
+        dismissClipboard()
         // 记一笔「插入」，滑下来就能原样恢复
         undoStack.addLast(UndoOp.Insert(removed))
         // 上文变了，联想也就没有依据了
@@ -3165,7 +3676,8 @@ class ShuangpinImeService : InputMethodService() {
         // 视图的 mode 已经被改成新模式了，光看它会把「中文→英文」当成
         // 「英文→中文」，结果中文那半轮拼音根本不上屏。
         if (currentMode == ShuangpinKeyboardView.Mode.CHINESE) {
-            session.commitTop()?.let { commitToHost(it) }
+            val pinyin = session.pinyin
+            session.commitTop()?.let { commitToHost(it, pinyin = pinyin) }
             // 只按了声母、没定音节的半截拼音没法上屏，直接丢掉。
             // 别让它留在预编辑区里：下一个字符会把它顶掉，那半个拼音就凭空消失了。
             if (session.composingText.isNotEmpty()) {
@@ -3342,6 +3854,26 @@ class ShuangpinImeService : InputMethodService() {
         /** 「光标在哪」标签里那一竖线的颜色（品牌蓝）。 */
         private const val COLOR_ACCENT_TEXT = 0xFF2F6DF6.toInt()
 
+        /** 剪贴板候选的字色（青——它不是候选，是个「刚复制的东西」）。 */
+        private const val COLOR_CLIPBOARD_TEXT = 0xFF0E7C7B.toInt()
+
+        /** 剪贴板候选的底色。 */
+        private const val COLOR_CLIPBOARD_BG = 0xFFE2F4F3.toInt()
+
+        /**
+         * 剪贴板内容在候选栏里最多显示几个字（超了用「…」截断）。
+         *
+         * 上屏的仍然是**完整内容**——这里只是显示得太长会把候选栏撑爆。
+         */
+        const val CLIPBOARD_DISPLAY_MAX = 14
+
+        /**
+         * 本地下一词最多给几个。
+         *
+         * 5 个够挑了；再多候选栏就全是联想，正经候选反而看不见。
+         */
+        const val LOCAL_NEXT_LIMIT = 5
+
         /** 拼音角标的字色（没选中的时候）。 */
         private const val COLOR_PINYIN_BADGE = 0xFF8A94A6.toInt()
 
@@ -3399,6 +3931,16 @@ class ShuangpinImeService : InputMethodService() {
 
         /** 撤销栈深度。 */
         const val UNDO_DEPTH = 20
+
+        /**
+         * 停手多久之后才去算**长句纠错**（ms）。
+         *
+         * 250 ms：连着打字的时候不算（算了也白算，下一个键就变了），
+         * 停下来才说明用户在看候选了。
+         *
+         * 这个计算在后台线程跑，不挡打字——但也别在每个键上都启动一次。
+         */
+        const val CORRECTION_DEBOUNCE_MS = 250L
 
         /** 当前使用的双拼方案。 */
         const val SCHEME_ID = "xiaohe"

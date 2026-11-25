@@ -172,6 +172,21 @@ class ImeSettings(context: Context) {
         set(v) = prefs.edit().putBoolean(KEY_CORRECT_AUTO, v).apply()
 
     // ------------------------------------------------------------------
+    // 剪贴板
+    // ------------------------------------------------------------------
+
+    /**
+     * 要不要把**剪贴板里的内容**摆进候选栏。
+     *
+     * 默认开：用户复制一段东西，切回来就能直接上屏（点一下或按空格）。
+     *
+     * 关掉之后完全不读剪贴板——介意的话可以在设置里关掉。
+     */
+    var clipboardEnabled: Boolean
+        get() = prefs.getBoolean(KEY_CLIPBOARD_ENABLED, true)
+        set(v) = prefs.edit().putBoolean(KEY_CLIPBOARD_ENABLED, v).apply()
+
+    // ------------------------------------------------------------------
 
     /**
      * 把老版本的配置搬过来。
@@ -246,6 +261,8 @@ class ImeSettings(context: Context) {
 
         const val KEY_CORRECT_ENABLED = "correct.enabled"
         const val KEY_CORRECT_AUTO = "correct.autoApply"
+
+        const val KEY_CLIPBOARD_ENABLED = "clipboard.enabled"
 
         /** 自建服务协议。 */
         const val PROTOCOL_SERVICE = "service"

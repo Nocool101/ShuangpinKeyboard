@@ -73,6 +73,9 @@ class CandidatePanel(context: Context) : LinearLayout(context) {
     private val itemBox = LinearLayout(context)
     private val itemScroll = ScrollView(context)
 
+    /** 左边那一列（音节）的滚动容器。 */
+    private var segmentScroll: ScrollView? = null
+
     init {
         orientation = VERTICAL
         setBackgroundColor(COL_BG)
@@ -86,8 +89,15 @@ class CandidatePanel(context: Context) : LinearLayout(context) {
         pinyinLabel.apply {
             textSize = 14f
             setTextColor(COL_MUTED)
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            // 拼音列表要**看得全**。
+            //
+            // 以前是「单行 + 省略号」：拼音一长就被截掉（用户反馈
+            // 「全键盘模式下打完拼音，点击向下箭头旁边的拼音列表拼音显示不全」，
+            // 单手模式输入得多了也一样）。
+            // 现在允许折行，标题栏的高度跟着内容长——
+            // 面板是独立的一屏（跟键盘同高），长一点不影响键位位置。
+            maxLines = 4
+            ellipsize = null
         }
         header.addView(
             pinyinLabel,
@@ -128,7 +138,9 @@ class CandidatePanel(context: Context) : LinearLayout(context) {
         header.addView(allTab, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
         header.addView(charTab, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
         header.addView(collapse, LayoutParams(dp(34f).toInt(), LayoutParams.MATCH_PARENT))
-        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, dp(30f).toInt()))
+        // 高度**跟着内容**：拼音多的时候要折行（见上面 pinyinLabel 的说明），
+        // 写死 30 dp 的话折出来的第二行会被切掉。
+        addView(header, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
         // ---------------- 主体：左边音节 + 右边候选 ----------------
         val body = LinearLayout(context).apply {
@@ -138,8 +150,19 @@ class CandidatePanel(context: Context) : LinearLayout(context) {
             orientation = VERTICAL
             setBackgroundColor(COL_SEG_BG)
         }
+        // 音节多的时候这一列要能**滚**。
+        //
+        // 以前每个音节按权重各占 1/n 的高度：音节一多，每格就只剩十几 dp，
+        // 文字被压扁、显示不全（用户反馈「输入的过多，拼音显示不全」）。
+        // 现在每格按内容高度排，列本身可以上下滑——音节再多也看得见。
+        segmentScroll = ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        segmentScroll?.addView(segmentBox)
         body.addView(
-            segmentBox,
+            segmentScroll,
             LayoutParams(dp(64f).toInt(), LayoutParams.MATCH_PARENT),
         )
         itemScroll.apply {
@@ -222,15 +245,18 @@ class CandidatePanel(context: Context) : LinearLayout(context) {
                 gravity = Gravity.CENTER
                 setTextColor(if (i == segmentIndex) COL_ACCENT else COL_SUB)
                 setPadding(0, dp(6f).toInt(), 0, dp(6f).toInt())
+                // 音节按内容高度排（不按权重瓜分高度）——
+                // 音节一多，每格只剩十几 dp，文字就显示不全了。
+                minHeight = dp(30f).toInt()
                 setOnClickListener { listener?.onSelectSegment(i) }
             }
             segmentBox.addView(
                 tv,
-                LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                },
+                LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT),
             )
         }
+        // 换音节了就把左列滚回最上面（选中的那个露出来）
+        segmentScroll?.scrollTo(0, 0)
     }
 
     /** 上一次画出来的候选内容签名。内容没变就不重建。 */

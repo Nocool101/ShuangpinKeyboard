@@ -116,6 +116,8 @@ class SettingsActivity : Activity() {
         root.addView(divider())
         buildCorrectSection(root)
         root.addView(divider())
+        buildClipboardSection(root)
+        root.addView(divider())
 
         root.addView(
             Button(this).apply {
@@ -592,10 +594,32 @@ class SettingsActivity : Activity() {
         )
     }
 
+    /**
+     * 剪贴板：把刚复制的内容摆进候选栏。
+     *
+     * 关掉之后**完全不读剪贴板**（隐私最稳）。
+     */
+    private fun buildClipboardSection(root: LinearLayout) {
+        root.addView(sectionTitle("剪贴板"))
+        root.addView(
+            switchRow(
+                "候选栏显示剪贴板",
+                "复制一段东西，切回来它就摆在候选栏最前面：\n" +
+                    "点一下上屏，或者按空格上屏",
+                settings.clipboardEnabled,
+            ) { settings.clipboardEnabled = it }
+        )
+        root.addView(
+            hint(
+                "关掉之后输入法不再读取剪贴板。\n" +
+                    "密码输入框里本来就不给剪贴板候选。"
+            )
+        )
+    }
+
     // ------------------------------------------------------------------
     // 保存与测试
     // ------------------------------------------------------------------
-
     private fun save() {
         // 开关类的设置在切换时就已经写进 ImeSettings 了；
         // 输入框里的内容统一在这里落盘。

@@ -272,6 +272,17 @@ enum class CandidateKind {
      * 见 [UserDict]。
      */
     USER,
+
+    /**
+     * **剪贴板内容**。
+     *
+     * 用户刚复制的那段文字，直接摆在候选栏里：
+     * 点一下上屏，或者按空格上屏。
+     *
+     * 它不是候选词（用户没在打拼音），所以单独一类——
+     * 样式上跟别的候选区分开，用户一眼知道「这是剪贴板，不是候选」。
+     */
+    CLIPBOARD,
 }
 
 /**
@@ -299,6 +310,16 @@ data class Candidate(
      * （用户明明打对了 "xianrenfuwoding"，却被排成「现任服我定」）。
      */
     val exact: Boolean = false,
+    /**
+     * 是不是**靠上文选出来的**候选。
+     *
+     * 「上一块 + 当前拼音」在词库里正好是一个词（"jie" + "guo" → 「结果」），
+     * 于是这一轮的尾巴「果」被提到最前面。
+     *
+     * 这是**词库给的硬证据**（不是模型猜的），所以它不参与端侧重排——
+     * 模型没见过这个词，让模型排就等于把它排到后面去。
+     */
+    val context: Boolean = false,
 )
 
 /**
@@ -384,6 +405,12 @@ object Candidates {
      *        纠错候选会改变池子的构成，混进去基线就没法比了。
      *        App 端显式打开。
      * @param userDict 用户自学习词库。默认取引擎上挂的那个（评估端是 null）。
+     * @param contextPinyin **上一块已上屏内容**的拼音（null = 没有上文）。
+     * @param contextText 上一块已上屏内容的文字。
+     *
+     * 这两个参数用来做**跨界组合**：上一块「结」（jie）+ 这一轮「guo」，
+     * 在词库里正好是「结果」——于是这一轮该给的是「果」，不是词频最高的「过」。
+     * 详见 [Context]。
      */
     fun build(
         engine: PinyinEngine,
@@ -393,12 +420,14 @@ object Candidates {
         maxChar: Int = MAX_CHAR,
         includeCorrections: Boolean = false,
         userDict: UserDict? = engine.userDict,
+        contextPinyin: String? = null,
+        contextText: String? = null,
     ): List<Candidate> {
-        val out = ArrayList<Candidate>()
+        // `out` 最后一步会被「上下文选词」重排一次，所以是 var
+        var out: List<Candidate> = ArrayList<Candidate>()
         // 去重：整句、词、扩展、单字四层经常重叠
         // （比如整句就是"你"，字表第一位也是"你"）
         val seen = HashSet<String>()
-
         // ⓪ 用户自学习词：用户打过的词排最前。
         // 词库里没有的词（「炼气士」）也能进候选栏——这正是自学习词库的意义。
         if (userDict != null) {
@@ -428,9 +457,12 @@ object Candidates {
 
         // ① 自动纠错：拼音打错了？把更像的词提上来。
         // 用户按空格就上屏它，这就是「自动」。
+        //
+        // 这里只纠**整串**（这一串拼音本身就是词库里的一个词时）。
+        // **长句里的错字由 [Corrections] 负责**——那个计算不便宜，
+        // 放在后台跑（见 App 层），结果到了再补进候选栏。
         val corrections = if (includeCorrections) {
-            val syllables = session.pending.map { it.syllable ?: "" }
-            Typos.corrections(dictionary, engine.table, syllables)
+            Typos.corrections(dictionary, engine.table, session.pending.map { it.syllable ?: "" })
         } else {
             emptyList()
         }
@@ -454,8 +486,8 @@ object Candidates {
             (exactText == null || exactScore < HOIST_MAX_SCORE)
 
         if (hoistCorrections) out += correctionItems
-        if (exactTaken && exactText != null) {
-            out += Candidate(exactText, CandidateKind.SENTENCE, exact = true)
+        if (exactTaken) {
+            out += Candidate(exactText.orEmpty(), CandidateKind.SENTENCE, exact = true)
         }
         if (!hoistCorrections) out += correctionItems
 
@@ -508,6 +540,52 @@ object Candidates {
                 taken++
             }
         }
+
+        // ⑧ **上下文选词**（跨界组合）：上一块 + 当前拼音在词库里是一个词
+        //    → 命中的那条提到最前面。
+        //
+        //    「结」（jie）+「guo」→ 词库里的「结果」→ 这一轮该给「果」，
+        //    而不是词频最高的「过」。
+        //
+        //    **不用等模型**：一次二分查找（2 μs），按完键立刻就是对的。
+        //    端侧重排排不了单字候选（图的输入不接受零行），
+        //    云端消歧要 500 ms 防抖 + 一次大模型往返——都太慢。
+        if (contextPinyin != null && contextText != null) {
+            val tails = Context.boundaryCandidates(
+                dictionary = dictionary,
+                prevPinyin = contextPinyin,
+                prevText = contextText,
+                curPinyin = session.pinyin,
+                curSyllables = session.pending.size,
+            )
+            if (tails.isNotEmpty()) {
+                out = promoteContext(tails, out)
+            }
+        }
+        return out
+    }
+
+    /**
+     * 把**上下文命中**的候选提到最前面。
+     *
+     * 只提**最高频的那一条**：「jieguo」在词库里还有「结过」（46 分），
+     * 那是冷门词，不该跟「结果」（76 分）一起顶上来。
+     *
+     * 命中的那条标上 [Candidate.context]——它是词库给的硬证据，
+     * 不该被端侧重排模型排到后面去（模型没见过这个词）。
+     */
+    private fun promoteContext(tails: List<String>, items: List<Candidate>): List<Candidate> {
+        val head = tails.firstOrNull() ?: return items
+        val idx = items.indexOfFirst { it.text == head }
+        if (idx < 0) {
+            // 候选池里没有它（生僻字被限流掉了）→ 补一条进去
+            return listOf(Candidate(head, CandidateKind.WORD, context = true)) + items
+        }
+        val out = ArrayList<Candidate>(items.size)
+        out += items[idx].copy(context = true)
+        for ((i, item) in items.withIndex()) {
+            if (i != idx) out += item
+        }
         return out
     }
 
@@ -540,6 +618,40 @@ object Candidates {
         return promoted + rest
     }
 }
+
+/**
+ * 分词出来的一个**词单元**。
+ *
+ * @param pinyin 这个词覆盖的拼音串
+ * @param word 这个词
+ * @param syllables 这个词覆盖的音节（逐个）
+ * @param start 它在整串音节里的起始下标
+ */
+data class SegmentUnit(
+    val pinyin: String,
+    val word: String,
+    val syllables: List<String>,
+    val start: Int,
+)
+
+/**
+ * 分词出来的一个**词**（带它在 DP 里的贡献分）。
+ *
+ * @param word 这个词
+ * @param syllables 它覆盖的音节
+ * @param start 它在整串音节里的起始下标
+ * @param count 它覆盖几个音节
+ * @param score 它在词库里的分数
+ * @param edgeScore 它在 DP 里贡献的分（词频 + 长词加分 − 分词罚分）
+ */
+data class WordSpan(
+    val word: String,
+    val syllables: List<String>,
+    val start: Int,
+    val count: Int,
+    val score: Int,
+    val edgeScore: Int,
+)
 
 /**
  * 双拼引擎。
@@ -687,6 +799,18 @@ class PinyinEngine(
         Extensions.find(dictionary, table.syllables, pinyin, limit)
 
     /**
+     * **本地下一词预测**（见 [Context.nextWords]）。
+     *
+     * 刚上屏「结」，它就给出「果」「婚」这些接下来最可能接的字——
+     * 全部来自词库，1 ms 内出结果，不用等云端。
+     */
+    fun nextWords(
+        prevPinyin: String,
+        prevText: String,
+        limit: Int = Context.DEFAULT_NEXT_LIMIT,
+    ): List<String> = Context.nextWords(dictionary, table.syllables, prevPinyin, prevText, limit)
+
+    /**
      * 把音节序列切成词——「整句」能力的基础。
      *
      * 输入法的整句本质上就是两件事：把用户敲的音节切成词，再把词拼成句子。
@@ -712,17 +836,65 @@ class PinyinEngine(
      * 词长和音节数对不上的（词库里有极少数这种怪词）会被跳过——
      * 对不上就不知道这个词对应哪几个音节，记了也是错的。
      */
-    fun segmentUnits(syllables: List<String>): List<Pair<String, String>> {
+    fun segmentUnits(syllables: List<String>): List<Pair<String, String>> =
+        segmentUnitSpans(syllables).map { it.pinyin to it.word }
+
+    /**
+     * 分词结果，**带上每个词覆盖的音节列表**。
+     *
+     * [segmentUnits] 只给「拼音切片 + 词」；
+     * 这里多给了音节本身和起始下标——
+     * 逐词纠错要拿这个词的音节单独去纠（见 [Candidates]），
+     * 提交前缀要知道这个词覆盖了几个音节（见 [InputSession.commitPrefix]）。
+     */
+    fun segmentUnitSpans(syllables: List<String>): List<SegmentUnit> {
         val path = segmentPaths(syllables, 1).firstOrNull() ?: return emptyList()
-        val out = ArrayList<Pair<String, String>>()
+        val out = ArrayList<SegmentUnit>()
         var idx = 0
         for (i in path.words.indices) {
             val word = path.words[i]
             val count = path.counts.getOrNull(i) ?: break
             val end = (idx + count).coerceAtMost(syllables.size)
             if (word.length == count && end > idx) {
-                out += syllables.subList(idx, end).joinToString("") to word
+                out += SegmentUnit(
+                    pinyin = syllables.subList(idx, end).joinToString(""),
+                    word = word,
+                    syllables = syllables.subList(idx, end).toList(),
+                    start = idx,
+                )
             }
+            idx = end
+            if (idx >= syllables.size) break
+        }
+        return out
+    }
+
+    /**
+     * 分词结果，**带上每个词在 DP 里的贡献分**。
+     *
+     * 跟 [segmentUnitSpans] 的区别：
+     * - 这里**不跳过**「字数跟音节数对不上」的词（词库里有「西安」这种
+     *   一个音节对应两个字的词条）——跳过它们的话音节就对不上了；
+     * - 多了 [WordSpan.edgeScore]：这个词在 DP 里贡献了多少分，
+     *   长句纠错要靠它判断「纠正之后是不是真的更好了」。
+     */
+    fun segmentWordSpans(syllables: List<String>): List<WordSpan> {
+        val path = segmentPaths(syllables, 1).firstOrNull() ?: return emptyList()
+        val out = ArrayList<WordSpan>()
+        var idx = 0
+        for (i in path.words.indices) {
+            val word = path.words[i]
+            val count = path.counts.getOrNull(i) ?: break
+            val end = (idx + count).coerceAtMost(syllables.size)
+            val score = path.candScores.getOrNull(i) ?: 0
+            out += WordSpan(
+                word = word,
+                syllables = syllables.subList(idx, end).toList(),
+                start = idx,
+                count = count,
+                score = score,
+                edgeScore = score + LONG_BONUS * (count - 1) - WORD_PENALTY,
+            )
             idx = end
             if (idx >= syllables.size) break
         }
@@ -753,7 +925,13 @@ class PinyinEngine(
     }
 
     /** 一条切分路径。 */
-    private data class Path(val score: Int, val words: List<String>, val counts: List<Int>) {
+    private data class Path(
+        val score: Int,
+        val words: List<String>,
+        val counts: List<Int>,
+        /** 每个词在词库里的分数（长词加分、分词罚分还没算）。 */
+        val candScores: List<Int> = emptyList(),
+    ) {
         val sentence: String get() = words.joinToString("")
     }
 
@@ -782,7 +960,14 @@ class PinyinEngine(
                 val cand = candidateFor(key, j - i == 1) ?: continue
                 val edge = cand.score + LONG_BONUS * (j - i - 1) - WORD_PENALTY
                 for (p in prev) {
-                    bucket.add(Path(p.score + edge, p.words + cand.text, p.counts + (j - i)))
+                    bucket.add(
+                        Path(
+                            p.score + edge,
+                            p.words + cand.text,
+                            p.counts + (j - i),
+                            p.candScores + cand.score,
+                        )
+                    )
                 }
             }
             if (bucket.isEmpty()) continue
@@ -807,10 +992,10 @@ class PinyinEngine(
 
     companion object {
         /** 长词每多覆盖一个音节额外加分，鼓励组成词而不是逐字切。 */
-        private const val LONG_BONUS = 10
+        const val LONG_BONUS = 10
 
         /** 每个词的罚分 discouraging 过度切分。参数由 tools/segment_eval.mjs 网格搜出来。 */
-        private const val WORD_PENALTY = 120
+        const val WORD_PENALTY = 120
 
         /** 词库里没有、只能退回单字时的额外罚分。 */
         private const val CHAR_FALLBACK_PENALTY = 20
@@ -1279,6 +1464,38 @@ class InputSession(private val engine: PinyinEngine) {
     fun commitText(text: String): String {
         committed += text
         reset()
+        return text
+    }
+
+    /**
+     * **提交前面若干个音节**，剩下的音节**留在会话里继续输入**。
+     *
+     * ## 为什么需要它
+     *
+     * 候选栏里既有整句，也有分出来的词。打「cangtianzhijian」时，
+     * 候选是「苍天之间 / 苍天 / 之间……」。
+     * 用户挑了**前面的**「苍天」——按老逻辑整轮输入就结束了，
+     * 后面那半截「zhijian」凭空消失（用户反馈
+     * 「在候选区选择前面的文字，后面的文字就会消失」）。
+     *
+     * 正确的做法是：上屏「苍天」，**「zhijian」留在预编辑区里**，
+     * 候选栏接着给「之间」。用户接着按空格就上屏「之间」，
+     * 整个过程不需要重新打字。
+     *
+     * @param text 要上屏的文字
+     * @param consumed 这一段文字覆盖了**前面几个音节**
+     */
+    fun commitPrefix(text: String, consumed: Int): String {
+        committed += text
+        if (consumed > 0 && consumed <= pending.size) {
+            pending.subList(0, consumed).clear()
+            insertAt = (insertAt - consumed).coerceIn(0, pending.size)
+        }
+        // 剩下的音节还在 → 回到「音节已定」，用户可以接着选词或继续打
+        stage = if (pending.isNotEmpty()) InputStage.SYLLABLE else InputStage.INITIAL
+        firstKey = null
+        finals = emptyMap()
+        caret = insertionOffset()
         return text
     }
 
