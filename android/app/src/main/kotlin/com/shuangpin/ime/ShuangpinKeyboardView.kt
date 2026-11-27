@@ -226,6 +226,24 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             }
         }
 
+    /**
+     * 单手模式下，**键盘本体占屏宽的比例**。
+     *
+     * 默认 [ONE_HAND_WIDTH_RATIO]（0.80）——用户可以在键盘上的「设置」面板里
+     * 自由调（见 `KeyboardSettingsPanel`），调完立刻生效，不用重启输入法。
+     *
+     * ⚠ **只在单手模式有意义**：全键盘模式下键盘横跨整个屏宽，这个值不参与计算。
+     */
+    var widthRatio: Float = ONE_HAND_WIDTH_RATIO
+        set(value) {
+            val v = value.coerceIn(MIN_WIDTH_RATIO, MAX_WIDTH_RATIO)
+            if (field != v) {
+                field = v
+                layoutKeys()
+                invalidate()
+            }
+        }
+
     /** 英文模式是否大写。 */
     var upperCase: Boolean = false
         set(value) {
@@ -496,13 +514,18 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         // 字母区（和底栏）占的横向范围。
         // 单手模式只占屏宽的一部分，**贴着拇指那一侧**——
         // 拇指的支点在手机右下角，键盘越靠右越好够。
-        blockWidth = if (oneHand) width * ONE_HAND_WIDTH_RATIO else width.toFloat()
+        // 宽度比例可以由用户自己调（见 widthRatio）。
+        blockWidth = if (oneHand) width * widthRatio else width.toFloat()
         blockLeft = if (layout == Layout.RIGHT) width - blockWidth else 0f
 
         // 单手模式底栏矮一点，把高度让给字母键——
         // 键变窄了，高度得补回来，点击面积才不至于缩水太多。
         val bottomH = dp(if (oneHand) 44f else 50f)
-        val letterH = ((height - bottomH - rowGap * 3 - pad * 2) / 3f).coerceAtLeast(dp(34f))
+        // ⚠ **下限不能太高**：键盘高度是用户可调的（最小 0.7 倍 = 151 dp），
+        // 下限要是 34 dp，三排字母 + 底栏就比键盘本身还高——
+        // 最后那排字母会被底栏盖住，键位还会跟底栏重叠（点到哪儿算哪儿）。
+        // 所以下限压到 24 dp，矮键盘时键面自动缩小（见 drawPinyin 的 tight）。
+        val letterH = ((height - bottomH - rowGap * 3 - pad * 2) / 3f).coerceAtLeast(dp(24f))
 
         when (mode) {
             Mode.CHINESE -> layoutChinese(pad, gap, rowGap, letterH)
@@ -653,6 +676,11 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         // 一次误触就发出一条消息、或者多打一个换行，
         // 后果比打错字严重得多（用户反馈过）。
         // 给它们之间留出 4 倍于普通键缝的空隙，物理上就不容易连着点。
+        //
+        // ⚠ **动作键加宽了，这段空隙一点没少**：
+        // 动作键是**右边不动、往左长**（长进空格键让出来的那一块），
+        // 空隙是单独算出来的，键宽怎么变它都不动——
+        // 手指从退格滑过去还是落空，不会误触。
         val sep = dp(if (oneHand) 10f else 16f)
 
         // 宽度分配：空格要宽，但动作键不能太窄（它是常用键）
@@ -675,7 +703,13 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 else -> 48f
             }
         )
-        var actionW = dp(if (oneHand) 34f else 62f)
+        // **动作键（右下角那个蓝的）向左加宽**。
+        //
+        // 它是常用键（发送 / 换行 / 前往 / 完成），原来单手模式只有 34 dp 宽，
+        // 拇指得瞄准那个角才按得到（用户反馈「前往按键太小、够不着」）。
+        // 现在单手 46 dp / 全键盘 84 dp——**右边贴着屏幕边不动，往左长**，
+        // 长出来的那一块是从空格键那儿借的（空格相应窄一点）。
+        var actionW = dp(if (oneHand) 46f else 84f)
         // 动作键和退格键固定宽，其余（含空格）分剩下的
         val fixedOthers = others - 1   // 除动作键外的功能键个数
         val minSpace = dp(if (oneHand) 40f else 70f)
@@ -926,12 +960,22 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
         // 字号也跟着缩——两个都塞进去只会糊成一片。
         val maxWidth = key.rect.width() - dp(6f)
         val narrow = key.rect.width() < dp(28f)
+        // **矮键盘**：用户把键盘调小了，键也矮了，
+        // 大字 + 拼音提示就叠不下了——两个都缩一号，
+        // 不缩的话拼音会糊在大字上，什么都看不清。
+        val tight = key.rect.height() < dp(32f)
 
         // 键位字母角标：告诉用户「这个键上按的是哪个字母」。
         // 韵母位上主标签让给韵母了，角标就是唯一的找键线索，必须够大看得清。
         face.badge?.let { badge ->
             badgeText.color = if (face.dead) COLOR_DEAD_TEXT else COLOR_BADGE
-            badgeText.textSize = dp(if (narrow) 9.5f else 11.5f)
+            badgeText.textSize = dp(
+                when {
+                    narrow -> 9.5f
+                    tight -> 9f
+                    else -> 11.5f
+                }
+            )
             canvas.drawText(badge, key.rect.left + dp(3f), key.rect.top + dp(11f), badgeText)
         }
 
@@ -940,7 +984,13 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
 
         // 主标签：声母位是声母，韵母位是韵母
         bigText.color = if (face.dead) COLOR_DEAD_TEXT else COLOR_INK
-        bigText.textSize = dp(if (face.big.length >= 3) 14f else 17f)
+        bigText.textSize = dp(
+            when {
+                tight -> 13f
+                face.big.length >= 3 -> 14f
+                else -> 17f
+            }
+        )
         // 太长就缩字号，避免超出键宽（"er/uan"、"iang/uang" 这类）
         // 单手模式键窄，下限放低一点，不然「uang」这种缩到 9dp 还是装不下
         val minSize = if (narrow) dp(7f) else dp(9f)
@@ -951,7 +1001,7 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             bigText.textSize -= dp(0.5f)
         }
         // 有副标签时，主标签往上抬一点，给底部的拼音腾地方
-        val bigBaseline = key.rect.centerY() - dp(if (hasSub) 6f else 0f) -
+        val bigBaseline = key.rect.centerY() - dp(if (hasSub) (if (tight) 4f else 6f) else 0f) -
             (bigText.descent() + bigText.ascent()) / 2f
         canvas.drawText(bigShown, key.rect.centerX(), bigBaseline, bigText)
 
@@ -970,7 +1020,14 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
             // 拼音是**灰色小字**，允许它贴到键边（留 2dp 就行）：
             // 主标签留 6dp 是因为它又大又粗，拼音不用。
             val subMax = key.rect.width() - dp(2f)
-            smallText.textSize = dp(if (shown.length >= 4) 9f else 10f)
+            // 矮键盘上拼音提示再小一号，否则会跟大字挤在一起
+            smallText.textSize = dp(
+                when {
+                    tight -> 7.5f
+                    shown.length >= 4 -> 9f
+                    else -> 10f
+                }
+            )
             while (smallText.measureText(shown) > subMax && smallText.textSize > dp(6f)) {
                 smallText.textSize -= dp(0.5f)
             }
@@ -984,7 +1041,13 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
                 if (shorter.isNotEmpty()) {
                     // 短的也要缩到装得下为止（单手模式键很窄），
                     // 宁可小一点，也要把「这个键是整体认读」这件事说出来。
-                    smallText.textSize = dp(if (shown.length >= 4) 9f else 10f)
+                    smallText.textSize = dp(
+                        when {
+                            tight -> 7.5f
+                            shown.length >= 4 -> 9f
+                            else -> 10f
+                        }
+                    )
                     while (smallText.measureText(shorter) > subMax && smallText.textSize > dp(6f)) {
                         smallText.textSize -= dp(0.5f)
                     }
@@ -1391,6 +1454,17 @@ class ShuangpinKeyboardView @JvmOverloads constructor(
          * 这个常量是 public 的（服务层要拿它算留白）。
          */
         const val ONE_HAND_WIDTH_RATIO = 0.80f
+
+        /**
+         * 单手模式宽度比例的**下限**。
+         *
+         * 再窄的话 10 个字母键挤成一条缝，按不准——
+         * 双拼靠的就是「按错一个键就出另一个字」，键太窄等于没法用。
+         */
+        const val MIN_WIDTH_RATIO = 0.50f
+
+        /** 单手模式宽度比例的**上限**（1.0 = 跟全键盘一样宽）。 */
+        const val MAX_WIDTH_RATIO = 1.0f
 
         /** 退格键纵向滑动触发阈值（px）。 */
         private const val SWIPE_THRESHOLD = 60f

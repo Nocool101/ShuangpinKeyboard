@@ -63,24 +63,58 @@ class CandidateTest {
     }
 
     @Test
-    fun `单字排在最后且标成 CHAR`() {
+    fun `单字按音节分组排且组号不倒退`() {
         type("nihc")
         val cands = Candidates.build(engine, session)
         val chars = cands.filter { it.kind == CandidateKind.CHAR }
         assertTrue("应该有单字候选", chars.isNotEmpty())
-        // 单字必须是最后一段
-        val lastNonChar = cands.indexOfLast { it.kind != CandidateKind.CHAR }
-        assertEquals("单字应集中在候选末尾", lastNonChar, cands.indexOfFirst { it.kind == CandidateKind.CHAR } - 1)
+        // 单字候选现在**跟着分组走**：一组一段，从前往后排
+        // （用户反馈「滑动选词要从前面选起」）。
+        // 组号不能倒退——倒退了就说明又翻回前面那组了。
+        val groups = chars.map { it.group }
+        assertTrue("单字候选应该属于某个分组：$groups", groups.all { it >= 0 })
+        for (i in 1 until groups.size) {
+            assertTrue(
+                "分组号不能倒退：$groups",
+                groups[i] >= groups[i - 1],
+            )
+        }
     }
 
     @Test
-    fun `长词扩展排在单字之前`() {
+    fun `分组候选紧跟在整句后面`() {
+        type("nihc")
+        val cands = Candidates.build(engine, session)
+        val sentenceIdx = cands.indexOfFirst { it.kind == CandidateKind.SENTENCE }
+        val groupIdx = cands.indexOfFirst { it.kind == CandidateKind.GROUP }
+        assertTrue("应该有分组候选", groupIdx >= 0)
+        assertTrue(
+            "分组候选应紧跟在整句后面：${cands.map { it.kind }}",
+            groupIdx > sentenceIdx,
+        )
+    }
+
+    @Test
+    fun `分组里词排在字前面`() {
+        type("nihc")
+        val cands = Candidates.build(engine, session)
+        val groupIdx = cands.indexOfFirst { it.kind == CandidateKind.GROUP }
+        val charIdx = cands.indexOfFirst { it.kind == CandidateKind.CHAR }
+        assertTrue("应该有分组候选", groupIdx >= 0)
+        assertTrue(
+            "组内词应排在字前面：${cands.map { it.kind }}",
+            groupIdx < charIdx,
+        )
+    }
+
+    @Test
+    fun `长词扩展排在分组候选之后`() {
         type("nihc")
         val cands = Candidates.build(engine, session)
         val extIdx = cands.indexOfFirst { it.kind == CandidateKind.EXTENSION }
-        val charIdx = cands.indexOfFirst { it.kind == CandidateKind.CHAR }
+        val groupIdx = cands.indexOfFirst { it.kind == CandidateKind.GROUP }
         if (extIdx >= 0) {
-            assertTrue("扩展候选应排在单字之前", extIdx < charIdx)
+            assertTrue("扩展候选应排在分组候选之后", extIdx > groupIdx)
             assertTrue("nihao 应能扩展出长词", cands[extIdx].text.startsWith("你好"))
         }
     }
@@ -114,8 +148,9 @@ class CandidateTest {
         val cands = Candidates.build(engine, session)
         val chars = cands.filter { it.kind == CandidateKind.CHAR }.map { it.text }
         assertTrue("单字候选不该为空", chars.isNotEmpty())
-        // 第一个单字应该是这个音节最高频的字
-        val first = session.candidates.first().toString()
+        // 第一个单字应该是**第一个音节**最高频的字
+        // （分组从前往后排，不再是「最后一个音节的字优先」）
+        val first = engine.candidateCharList("ni").first().toString()
         assertEquals("第一个单字应是最高频的字", first, chars.first())
     }
 

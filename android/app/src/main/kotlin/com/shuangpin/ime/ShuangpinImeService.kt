@@ -8,6 +8,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
@@ -74,6 +76,24 @@ class ShuangpinImeService : InputMethodService() {
 
     /** 选字面板（⌄ 展开的那一屏）。默认不显示。 */
     private var panel: CandidatePanel? = null
+
+    /**
+     * 键盘顶部的 **⚙ 设置键**。
+     *
+     * 它在**候选区左边**；单手模式下正好**正对常用标点竖列的顶端**
+     * ——跟系统输入法把工具键放在那一列上面是一个道理。
+     */
+    private var settingsButton: TextView? = null
+
+    /**
+     * 键盘上的「设置」浮层（布局 + 大小）。
+     *
+     * 盖在键盘上面，不占额外高度。
+     */
+    private var settingsPanel: KeyboardSettingsPanel? = null
+
+    /** 键盘本体所在的那一层——浮层是它的兄弟节点，盖在它上面。 */
+    private var keyboardHost: FrameLayout? = null
 
     /** 选字面板是不是开着。 */
     private var panelOpen: Boolean = false
@@ -575,9 +595,30 @@ class ShuangpinImeService : InputMethodService() {
         val l = keyLayout()
         keyboard?.layout = l
         keyboard?.finalArrange = finalArrange()
+        // 单手模式的键盘宽度：用户在设置里调过就按他调的来。
+        keyboard?.widthRatio = settings?.kbWidthRatio
+            ?: ShuangpinKeyboardView.ONE_HAND_WIDTH_RATIO
+
+        // 设置键的位置跟着键盘形态走：
+        // 右手模式 → 屏幕左边（正对常用标点竖列）
+        // 左手模式 → 屏幕右边（正对常用标点竖列）
+        // 全键盘   → 屏幕左边（候选区左边）
+        settingsButton?.let { btn ->
+            val lp = btn.layoutParams as? FrameLayout.LayoutParams
+                ?: FrameLayout.LayoutParams(dp(SETTINGS_BTN_DP).toInt(), FrameLayout.LayoutParams.MATCH_PARENT)
+            lp.width = dp(SETTINGS_BTN_DP).toInt()
+            lp.gravity = if (l == ShuangpinKeyboardView.Layout.LEFT) {
+                Gravity.TOP or Gravity.END
+            } else {
+                Gravity.TOP or Gravity.START
+            }
+            btn.layoutParams = lp
+        }
+
         val row = candidateRow ?: return
         if (l == ShuangpinKeyboardView.Layout.FULL) {
-            row.setPadding(0, 0, 0, 0)
+            // 全键盘：候选区左边让出设置键的位置，候选不被它盖住。
+            row.setPadding(dp(SETTINGS_BTN_DP).toInt(), 0, 0, 0)
             return
         }
         // 留白区那一侧加内边距，候选栏就缩到跟键盘同一侧了
@@ -591,18 +632,79 @@ class ShuangpinImeService : InputMethodService() {
     }
 
     // ------------------------------------------------------------------
+    // 键盘设置（键盘上的 ⚙ 键）
+    // ------------------------------------------------------------------
+
+    /** 键盘本体的当前高度（dp）。用户在设置里调过高度就不是标准值了。 */
+    private fun keyboardHeightDp(): Float =
+        KEYBOARD_HEIGHT_DP * (settings?.kbHeightScale ?: ImeSettings.DEFAULT_KB_HEIGHT_SCALE)
+
+    /**
+     * 打开 / 关闭键盘上的「设置」浮层。
+     *
+     * 浮层盖在键盘上面，不占额外高度——
+     * 用户调键盘大小时能**看着键盘实时变大变小**，不用关了才知道。
+     */
+    private fun toggleKeyboardSettings() {
+        val sp = settingsPanel ?: return
+        if (sp.visibility == View.VISIBLE) {
+            closeKeyboardSettings()
+            return
+        }
+        // 选字面板开着的话先收起来——两个浮层不能叠在一起。
+        if (panelOpen) closePanel()
+        sp.bind(
+            settings?.keyLayout ?: ImeSettings.KEY_LAYOUT_RIGHT,
+            settings?.finalArrange ?: ImeSettings.FINAL_ARRANGE_FIXED,
+            settings?.kbHeightScale ?: ImeSettings.DEFAULT_KB_HEIGHT_SCALE,
+            settings?.kbWidthRatio ?: ImeSettings.DEFAULT_KB_WIDTH_RATIO,
+        )
+        sp.visibility = View.VISIBLE
+    }
+
+    /** 关掉设置浮层。 */
+    private fun closeKeyboardSettings() {
+        settingsPanel?.visibility = View.GONE
+    }
+
+    /**
+     * 键盘高度变了：键盘本体、选字面板、输入法窗口三处都得跟着变。
+     *
+     * 窗口高度不变的话，键盘就会被挤出屏幕底下（或者上面多出一截空白）。
+     */
+    private fun applyKeyboardHeight() {
+        val h = dp(keyboardHeightDp()).toInt()
+        keyboardHost?.let { host ->
+            host.layoutParams = host.layoutParams.apply { height = h }
+        }
+        panel?.let { p ->
+            p.layoutParams = p.layoutParams.apply { height = h }
+        }
+        applyWindowHeight()
+    }
+
+    // ------------------------------------------------------------------
     // 输入视图
     // ------------------------------------------------------------------
 
     override fun onCreateInputView(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        // 根布局是 FrameLayout：内容竖着排，设置浮层盖在**整块**内容上面。
+        //
+        // 浮层为什么盖「候选区 + 键盘」而不是只盖键盘：
+        // 键盘高度是用户可调的（最小 0.7 倍），只盖键盘的话，
+        // 键盘一小，面板就放不下了——滑杆和「完成」按钮会被屏幕底边切掉。
+        // 连候选区一起盖，面板始终有足够的高度。
+        val root = FrameLayout(this).apply {
             setBackgroundColor(0xFFE9EBF0.toInt())
             // 底部留白：给系统导航条（地球切换键那一行）腾位置。
             // 系统是按「输入视图的测量高度」决定输入法窗口高度的，
             // 而导航条是画在窗口底部、盖在内容之上的——
             // 底部不留出这段空间，地球键就会压住键盘的底行。
             setPadding(0, 0, 0, dp(NAV_BAR_SLACK_DP).toInt())
+        }
+        // 竖着排的内容：候选栏 + 键盘 + 选字面板
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
         }
 
         val scroll = HorizontalScrollView(this).apply {
@@ -705,16 +807,45 @@ class ShuangpinImeService : InputMethodService() {
         // 单手模式：候选栏跟着键盘收窄到同一侧——
         // 键盘在右边、候选栏还横跨全屏的话，最顺手的那几个候选反而够不着。
         candidateRow = row
+
+        // ---- 顶部那一行：候选区 + 左边那颗「设置」键 ----
+        //
+        // 设置键放在**候选区的左边**；单手模式下它贴着屏幕边——
+        // 正好落在**常用标点竖列的顶端**（那一列的正上方），
+        // 跟系统输入法把工具键放在标点列上面是一个道理。
+        val topRow = FrameLayout(this)
+        topRow.addView(
+            row,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        val gear = TextView(this).apply {
+            text = "⚙"
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setTextColor(0xFF5B6472.toInt())
+            contentDescription = "键盘设置"
+            setOnClickListener { toggleKeyboardSettings() }
+        }
+        settingsButton = gear
+        topRow.addView(
+            gear,
+            FrameLayout.LayoutParams(
+                dp(SETTINGS_BTN_DP).toInt(),
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
         applyKeyLayout()
 
-        root.addView(
-            row,
+        content.addView(
+            topRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(CANDIDATE_BAR_DP).toInt(),
             ),
         )
-
         val kb = ShuangpinKeyboardView(this)
         kb.bind(session, engine)
         // 键盘形态：单手右手 / 单手左手 / 全键盘。
@@ -813,13 +944,67 @@ class ShuangpinImeService : InputMethodService() {
             }
         }
         keyboard = kb
-        root.addView(
+
+        // 键盘本体外面套一层：设置浮层是它的兄弟节点，盖在它上面。
+        //
+        // ⚠ **键盘高度是固定的**（用户没在设置里调过的话）——
+        // 按键位置必须始终在同一个地方，否则候选栏一出现键盘就整体下移，
+        // 用户瞄准的第二个键会按空。用户在设置里调了高度，
+        // 这里的窗口高度也跟着一起变（见 keyboardHeightDp）。
+        val host = FrameLayout(this)
+        keyboardHost = host
+        host.addView(
             kb,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+
+        // 「设置」浮层：布局 + 键盘大小。
+        val sp = KeyboardSettingsPanel(this)
+        sp.visibility = View.GONE
+        sp.listener = object : KeyboardSettingsPanel.Listener {
+            override fun onLayoutChoice(value: String) {
+                settings?.keyLayout = value
+                applyKeyLayout()
+            }
+
+            override fun onFinalArrangeChoice(value: String) {
+                settings?.finalArrange = value
+                applyKeyLayout()
+            }
+
+            override fun onHeightScale(scale: Float) {
+                settings?.kbHeightScale = scale
+                applyKeyboardHeight()
+            }
+
+            override fun onWidthRatio(ratio: Float) {
+                settings?.kbWidthRatio = ratio
+                applyKeyLayout()
+            }
+
+            override fun onReset() {
+                settings?.keyLayout = ImeSettings.KEY_LAYOUT_RIGHT
+                settings?.finalArrange = ImeSettings.FINAL_ARRANGE_FIXED
+                settings?.kbHeightScale = ImeSettings.DEFAULT_KB_HEIGHT_SCALE
+                settings?.kbWidthRatio = ImeSettings.DEFAULT_KB_WIDTH_RATIO
+                applyKeyLayout()
+                applyKeyboardHeight()
+            }
+
+            override fun onClose() {
+                closeKeyboardSettings()
+            }
+        }
+        settingsPanel = sp
+
+        content.addView(
+            host,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                // 键盘高度固定不变——按键位置必须始终在同一个地方，
-                // 否则候选栏一出现键盘就整体下移，用户瞄准的第二个键会按空。
-                dp(KEYBOARD_HEIGHT_DP).toInt(),
+                dp(keyboardHeightDp()).toInt(),
             ),
         )
 
@@ -851,11 +1036,28 @@ class ShuangpinImeService : InputMethodService() {
             }
         }
         panel = p
-        root.addView(
+        content.addView(
             p,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(KEYBOARD_HEIGHT_DP).toInt(),
+                // 选字面板跟键盘**同一个高度**（一个显示一个隐藏）——
+                // 窗口高度不变，展开/收起时键盘不会上下漂。
+                dp(keyboardHeightDp()).toInt(),
+            ),
+        )
+        root.addView(
+            content,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        // 设置浮层：盖在整块内容上面（候选区 + 键盘）。
+        root.addView(
+            sp,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
         applyWindowHeight()
@@ -867,11 +1069,18 @@ class ShuangpinImeService : InputMethodService() {
      *
      * 只靠 onComputeInsets 的 contentTopInsets 在部分 ROM（含本机 MagicOS）会被忽略，
      * 结果键盘被撑满整屏、键被拉成又窄又高。这里直接改 Window 的 LayoutParams 才稳。
+     *
+     * ⚠ **用户调过键盘高度时，窗口高度要跟着变**：
+     * 窗口 = 候选栏 + 键盘 + 底部留白，键盘那一块变了，另外两块不变。
+     * 不跟着变的话，键盘要么被挤出屏幕底下，要么上面空出一截。
      */
     private fun applyWindowHeight() {
         val win = window?.window ?: return
-        if (windowHeightPx == 0) {
-            windowHeightPx = dp(IME_WINDOW_HEIGHT_DP).toInt()
+        val want = dp(
+            IME_WINDOW_HEIGHT_DP + (keyboardHeightDp() - KEYBOARD_HEIGHT_DP)
+        ).toInt()
+        if (windowHeightPx != want) {
+            windowHeightPx = want
             val lp = win.attributes
             lp.width = WindowManager.LayoutParams.MATCH_PARENT
             lp.height = windowHeightPx
@@ -977,6 +1186,9 @@ class ShuangpinImeService : InputMethodService() {
         super.onStartInputView(info, restarting)
         applyWindowHeight()
         applySoftInputMode()
+        // 设置浮层不跟着键盘一起留着——收起再弹出时它应该关着，
+        // 不然会挡住半个键盘。
+        closeKeyboardSettings()
         // 设置里改了键盘形态的话，这次弹键盘就生效
         // （输入法服务是常驻的，不会因为改设置而重建）。
         applyKeyLayout()
@@ -1320,15 +1532,23 @@ class ShuangpinImeService : InputMethodService() {
         // 剪贴板摆最前面：用户刚复制的东西，点一下（或按空格）就能上屏
         if (clip != null) visibleItems = listOf(clip) + visibleItems
         val sig = session.pinyin + "|" + visibleItems.joinToString("|") { it.text }
+        // 换了新一轮输入（拼音串变了）就回到第一页。
+        // 不复位的话：用户滑到第 3 页，再打一个字，
+        // 新候选还停在第 3 页——看起来像「候选没更新」。
+        //
+        // ⚠ **这个判断必须放在「内容没变就跳过」的前面**：
+        // 同一个拼音打两遍，内容一模一样，那句「没变」直接就返回了——
+        // 滚动位置也就留在上一轮滑到的地方，用户看到的还是上一页，
+        // 第一个候选压根没露脸（用户反馈「打过一次第二次打，第一个候选不是这个」）。
+        val newRound = session.pinyin != lastCandidatePinyin
+        if (newRound) {
+            lastCandidatePinyin = session.pinyin
+            scroll.scrollTo(0, 0)
+        }
         if (sig == lastCandidateSig) {
             updatePageInfo()
             return
         }
-        // 换了新一轮输入（拼音串变了）就回到第一页。
-        // 不复位的话：用户滑到第 3 页，再打一个字，
-        // 新候选还停在第 3 页——看起来像「候选没更新」。
-        val newRound = session.pinyin != lastCandidatePinyin
-        lastCandidatePinyin = session.pinyin
         lastCandidateSig = sig
 
         // 候选变了：**选中的那条还在就跟着挪到新位置**，不在了才作废。
@@ -1339,7 +1559,13 @@ class ShuangpinImeService : InputMethodService() {
         bar.removeAllViews()
         chipHolders.clear()
         candidateItems = visibleItems
-        visibleItems.forEachIndexed { i, item -> addChip(item, isFirst = i == 0) }
+        // 分组的第一颗画一根分隔线——用户一眼看得出分组的边界
+        var lastGroup = -1
+        visibleItems.forEachIndexed { i, item ->
+            val groupStart = item.group >= 0 && item.group != lastGroup
+            if (item.group >= 0) lastGroup = item.group
+            addChip(item, isFirst = i == 0, groupStart = groupStart)
+        }
         selectedIndex = if (selectedText == null) {
             -1
         } else {
@@ -1403,10 +1629,32 @@ class ShuangpinImeService : InputMethodService() {
         if (order.isEmpty() || rerankedPinyin != session.pinyin) return protected + rest
         val rank = HashMap<String, Int>()
         order.forEachIndexed { i, text -> rank[text] = i }
-        val equal = equalLengthCandidates(rest)
-        val others = rest.filter { it.text.length != session.pending.size }
+        // **分组候选不参与重排**：
+        // - 模型只见过常用词，「北风」这种分组词它不认识，一喂进去就排到后面去；
+        // - 用户是从**前往后一组一组**挑的（用户反馈「滑动选词要从前面选起」），
+        //   它们必须留在整句后面，不能被重排挪走。
+        //
+        // 所以先把它们摘出来，等长候选排完再插回**整句后面**。
+        val groups = rest.filter { it.group >= 0 }
+        val plain = rest.filter { it.group < 0 }
+        val equal = equalLengthCandidates(plain)
+        val others = plain.filter { it.text.length != session.pending.size }
         // sortedBy 是稳定排序，没在模型结果里的排最后
-        return protected + equal.sortedBy { rank[it.text] ?: Int.MAX_VALUE } + others
+        val sorted = equal.sortedBy { rank[it.text] ?: Int.MAX_VALUE }
+        // 分组候选插在整句后面（整句不在的话就是最前面）
+        val merged = ArrayList<Candidate>(sorted.size + groups.size + others.size)
+        var inserted = false
+        for (c in sorted) {
+            merged += c
+            if (!inserted && c.kind == CandidateKind.SENTENCE) {
+                merged += groups
+                inserted = true
+            }
+        }
+        if (!inserted) {
+            merged.addAll(0, groups)
+        }
+        return protected + merged + others
     }
 
     /**
@@ -1619,7 +1867,10 @@ class ShuangpinImeService : InputMethodService() {
         val baseTextColor: Int,
     )
 
-    private fun addChip(item: Candidate, isFirst: Boolean) {
+    private fun addChip(item: Candidate, isFirst: Boolean, groupStart: Boolean = false) {
+        // 每一组的第一颗：左边空一段 + 一根分隔线，
+        // 用户一眼看得出「这批是「北风」那组的，下一批是「卷地」那组的」。
+        val groupGap = if (groupStart) dp(10f).toInt() else 0
         // 剪贴板：单独画。它不是候选词，是个「刚复制的东西」——
         // 摆最前面，标成剪贴板的样子（用户一眼知道这不是候选）。
         if (item.kind == CandidateKind.CLIPBOARD) {
@@ -1647,10 +1898,14 @@ class ShuangpinImeService : InputMethodService() {
         // 长词扩展（「你好吗」对应 2 个音节）之类对不上，就走老样式。
         // 单字候选例外：它只属于**一个**音节，那个音节的拼音就标在它上面
         // （用户要能看出这个字是哪来的、是哪一音节的）。
+        //
+        // **分组里的词**（北风）例外：它要整条上屏，不拆开——
+        // 拆开的话点其中一个字就变成「改这个字」了，不是用户的意思。
         val isCharItem = item.kind == CandidateKind.CHAR && item.pinyin != null
         val perChar: List<String>? = when {
-            syllables.isNotEmpty() && syllables.size == item.text.length -> syllables
+            item.kind == CandidateKind.GROUP -> null
             isCharItem -> listOf(item.pinyin!!)
+            syllables.isNotEmpty() && syllables.size == item.text.length -> syllables
             else -> null
         }
 
@@ -1664,7 +1919,13 @@ class ShuangpinImeService : InputMethodService() {
                 text = item.text
                 textSize = size
                 setTextColor(color)
-                setPadding(dp(12f).toInt(), dp(4f).toInt(), dp(12f).toInt(), dp(4f).toInt())
+                setPadding(
+                    dp(12f).toInt() + groupGap,
+                    dp(4f).toInt(),
+                    dp(12f).toInt(),
+                    dp(4f).toInt(),
+                )
+                if (groupStart) setCompoundDrawablesRelativeWithIntrinsicBounds(groupLine(), null, null, null)
                 if (bg != 0) setBackgroundColor(bg)
                 setOnClickListener { commitChip(item) }
             }
@@ -1681,9 +1942,23 @@ class ShuangpinImeService : InputMethodService() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6f).toInt(), 0, dp(6f).toInt(), 0)
+            setPadding(dp(6f).toInt() + groupGap, 0, dp(6f).toInt(), 0)
             if (bg != 0) setBackgroundColor(bg)
             setOnClickListener { commitChip(item) }
+        }
+        // 分组的第一颗：左边插一根分隔线（LinearLayout 没有 compound drawable）
+        if (groupStart) {
+            box.addView(
+                View(this).apply {
+                    setBackgroundColor(0xFFC8CDD8.toInt())
+                    layoutParams = LinearLayout.LayoutParams(
+                        dp(1f).toInt(),
+                        dp(18f).toInt(),
+                    ).also {
+                        it.rightMargin = dp(8f).toInt()
+                    }
+                },
+            )
         }
         val charViews = mutableListOf<TextView>()
         val pinyinViews = mutableListOf<TextView>()
@@ -1730,9 +2005,15 @@ class ShuangpinImeService : InputMethodService() {
                 gravity = Gravity.CENTER
                 setOnClickListener {
                     if (isCharItem) {
-                        // 用这个字上屏整句（它属于哪个音节就替哪个音节）
-                        val seg = session.pending.indexOfFirst { it.syllable == syl }
-                        commitCharAt(item.text, seg.coerceAtLeast(0))
+                        if (item.consumed > 0) {
+                            // **分组里的字**：前面几组的默认文字 + 这个字，
+                            // 后面的音节留在会话里继续挑。
+                            commitChip(item)
+                        } else {
+                            // 用这个字上屏整句（它属于哪个音节就替哪个音节）
+                            val seg = session.pending.indexOfFirst { it.syllable == syl }
+                            commitCharAt(item.text, seg.coerceAtLeast(0))
+                        }
                     } else {
                         commitChip(item)
                     }
@@ -1773,9 +2054,19 @@ class ShuangpinImeService : InputMethodService() {
         else -> 0xFF171B23.toInt()
     }
 
+    /**
+     * 分组之间的分隔线：一根细竖线。
+ *
+     * 候选栏按「音节组」往后排（用户反馈「滑动选词要从前面选起」），
+     * 没有分隔线的话用户分不清这批字属于哪一组。
+ */
+    private fun groupLine(): Drawable = GradientDrawable().apply {
+        setColor(0xFFC8CDD8.toInt())
+        setSize(dp(1f).toInt(), dp(18f).toInt())
+    }
+
     /** 候选字的底色；0 = 不要底色。 */
-    private fun chipBackground(item: Candidate, isFirst: Boolean): Int = when {
-        isFirst -> 0xFFFFF8E8.toInt()
+    private fun chipBackground(item: Candidate, isFirst: Boolean): Int = when {        isFirst -> 0xFFFFF8E8.toInt()
         item.kind == CandidateKind.USER -> 0xFFFDF0E3.toInt()
         item.kind == CandidateKind.CORRECTION -> 0xFFE4F4EA.toInt()
         item.kind == CandidateKind.CORRECTION_TEXT -> 0xFFF3E8F8.toInt()
@@ -1791,7 +2082,7 @@ class ShuangpinImeService : InputMethodService() {
         // 用户自学习词：也放大一点——它排在最前面，得一眼看见
         CandidateKind.USER -> 19f
         CandidateKind.SENTENCE_ALT -> 18f
-        CandidateKind.WORD, CandidateKind.CHAR -> 18f
+        CandidateKind.WORD, CandidateKind.CHAR, CandidateKind.GROUP -> 18f
         // 扩展候选、下一词建议：字号小一档，视觉上和主候选分开
         CandidateKind.EXTENSION, CandidateKind.NEXT_WORD -> 17f
         // 云端整句纠错：一整句话，字号小一档才放得下
@@ -1810,7 +2101,23 @@ class ShuangpinImeService : InputMethodService() {
         clearCandidateSelection()
         when (item.kind) {
             // 单字是「前面的音节 + 这个字」
-            CandidateKind.CHAR -> commitChar(item.text)
+            CandidateKind.CHAR -> {
+                // **分组里的字**：前面几组的默认文字 + 这个字，
+                // 剩下的音节留在会话里继续挑（用户反馈「滑动选词要从前面选起」）。
+                if (item.consumed > 0) {
+                    commitText(item.prefix + item.text, consumed = item.consumed, split = false)
+                } else {
+                    commitChar(item.text)
+                }
+            }
+            // **分组里的词**：前面几组的默认文字 + 这个词，
+            // 吃掉它覆盖的那几个音节，后面的留在会话里继续挑。
+            //
+            // split = false：用户是**自己挑**的，
+            // 分词拆出来的词未必是他挑的（他挑了「百草」，分词给的是「白草」），
+            // 记进去反而污染词库。
+            CandidateKind.GROUP ->
+                commitText(item.prefix + item.text, consumed = item.consumed, split = false)
             // 云端整句纠错：把已上屏的那段换掉
             CandidateKind.CORRECTION_TEXT -> applyCorrection()
             // 剪贴板：整段上屏
@@ -2140,7 +2447,14 @@ class ShuangpinImeService : InputMethodService() {
         panelSegmentIndex = index.coerceIn(0, segs.size - 1)
         panelOpen = true
         p.visibility = View.VISIBLE
-        keyboard?.visibility = View.GONE
+        setKeyboardShown(false)
+        // 列表滚回最上面。
+        //
+        // 面板里的字表**内容没变时不会重建**（省掉几百个 TextView），
+        // 滚动位置也就留在上一次滑到的地方——
+        // 打「long」滑到第二页挑了「陇」，下一轮再打「long」，
+        // 面板还是停在那页（用户反馈「下次再打龙不会在第一页」）。
+        p.resetScroll()
         // 候选栏整条让位：面板的「全部」页展示的就是这批候选，
         // 在面板上方再摆一份，用户很容易点错——
         // 点错会直接上屏，面板却还开着，键盘就回不来了。
@@ -2174,10 +2488,23 @@ class ShuangpinImeService : InputMethodService() {
         if (!panelOpen) return
         panelOpen = false
         panel?.visibility = View.GONE
-        keyboard?.visibility = View.VISIBLE
+        setKeyboardShown(true)
         panelPicked.clear()
         // 候选栏重新露出来（面板期间它一直让位）
         renderCandidates()
+    }
+
+    /**
+     * 键盘本体让位 / 回到原位（选字面板跟键盘**换位置**，窗口高度不变）。
+     *
+     * ⚠ **藏的是 host（键盘外面那层），光藏键盘视图不管用**：
+     * host 还在那儿占着高度，选字面板就会被挤到屏幕外面去——
+     * 用户看到的是一片空白（真机截图抓过：打完拼音点 ⌄，底下什么都没有）。
+     */
+    private fun setKeyboardShown(shown: Boolean) {
+        val v = if (shown) View.VISIBLE else View.GONE
+        keyboardHost?.visibility = v
+        keyboard?.visibility = v
     }
 
     /** 面板数据刷新（当前音节变了、候选变了都要刷）。 */
@@ -2672,10 +2999,14 @@ class ShuangpinImeService : InputMethodService() {
     private fun insertNextWords(items: List<Candidate>): List<Candidate> {
         val words = (localNextWords + nextWords).distinct()
         if (words.isEmpty()) return items
-        val at = items.indexOfFirst { it.kind == CandidateKind.CHAR }
-            .let { if (it < 0) items.size else it }
+        // **摆最后**：下一词是「这一句上屏之后接下来该打什么」，
+        // 跟「这一句的每一段能挑什么」是**两件事**。
+        // 摆在前面的话，用户在分组里挑完「北风」，
+        // 候选栏第一个跳出来的是「这 吹 狼 行 滔滔」——
+        // 他要的是下一组（卷地）能挑什么，得先划过去才能看到
+        // （用户反馈「选择前面的文字不要推荐文字，直接下一组文字/词的选择」）。
         val next = words.map { Candidate(it, CandidateKind.NEXT_WORD) }
-        return items.toMutableList().apply { addAll(at, next) }
+        return items + next
     }
 
     /**
@@ -2847,12 +3178,15 @@ class ShuangpinImeService : InputMethodService() {
      * @param units    要记进词库的「拼音 → 词」；不给就按当前会话推算。
      * @param consumed 这一段覆盖了**前面几个音节**（>0 = 只提交前半截，
      *   后面的音节留在会话里继续输入，见 [InputSession.commitPrefix]）。
+     * @param split    学词库时要不要按分词结果拆成一个个词。
+     *   **用户手动挑过字的时候不拆**（分词拆出来的词未必是他挑的）。
      */
     private fun commitText(
         text: String,
         followUp: Boolean = true,
         units: List<Pair<String, String>>? = null,
         consumed: Int = 0,
+        split: Boolean = true,
     ) {
         // 学习必须在会话重置**之前**做：拼音串（session.pinyin）
         // 这时候还在，重置后就没了。
@@ -2862,7 +3196,7 @@ class ShuangpinImeService : InputMethodService() {
         } else {
             allSyllables.joinToString("")
         }
-        val learnUnits = units ?: learningUnits(text, consumed)
+        val learnUnits = units ?: learningUnits(text, consumed, split)
         learnCommit(text, learnUnits)
         // **组合学习**：上一块 + 这一块 一起记一条（见 learnCombination）
         learnCombination(pinyin, text)
@@ -2903,19 +3237,40 @@ class ShuangpinImeService : InputMethodService() {
      * 对不齐（比如上屏的是词库里的长词，覆盖的音节数跟字数不一样）就不记——
      * 记错的比不记更糟。
      *
+     * ⚠ **本轮已经提交掉的部分也要算进来**。
+     *
+     * 分组选择是**一段一段提交**的：选完「北风」提交一次，「卷地」再提交一次……
+     * 每段提交只知道自己那一段。不把前面提交过的攒起来，
+     * 学到词库里的就只有「北风」「卷地」两个碎片，
+     * 整句「北风卷地百草折」没人记得——
+     * 下次打同样的拼音，候选第一个还是词库里的「北风卷地白草折」
+     * （用户反馈）。
+     *
      * @param syllableCount 只算**前面几个音节**（提交前缀时用：后面的音节还在会话里）。
+     * @param split 要不要按分词结果拆成一个个词。
+     *        **用户手动挑过字的时候不拆**——分词拆出来的词未必是他挑的
+     *        （他挑了「百草」，分词给的是「白草」）。
      */
-    private fun learningUnits(text: String, syllableCount: Int = 0): List<Pair<String, String>> {
+    private fun learningUnits(
+        text: String,
+        syllableCount: Int = 0,
+        split: Boolean = true,
+    ): List<Pair<String, String>> {
         val all = session.pending.map { it.syllable ?: "" }
-        val syllables = if (syllableCount in 1..all.size) all.take(syllableCount) else all
-        if (syllables.isEmpty() || syllables.size != text.length) return emptyList()
-        if (text.length < 2) return emptyList()
+        val tail = if (syllableCount in 1..all.size) all.take(syllableCount) else all
+        // 本轮已经提交掉的 + 这一次提交的 = 整轮
+        val syllables = session.roundCommittedSyllables + tail
+        val fullText = session.roundCommittedText + text
+        if (syllables.isEmpty() || syllables.size != fullText.length) return emptyList()
+        if (fullText.length < 2) return emptyList()
         val out = ArrayList<Pair<String, String>>()
         // 整句一条
-        out += syllables.joinToString("") to text
+        out += syllables.joinToString("") to fullText
         // 按分词拆开，一个词一条
-        for ((pinyin, word) in engine.segmentUnits(syllables)) {
-            if (word.length >= 2 && word != text) out += pinyin to word
+        if (split) {
+            for ((pinyin, word) in engine.segmentUnits(syllables)) {
+                if (word.length >= 2 && word != fullText) out += pinyin to word
+            }
         }
         return out
     }
@@ -3768,7 +4123,11 @@ class ShuangpinImeService : InputMethodService() {
         const val CANDIDATE_BAR_DP = 46f
 
         /**
-         * 输入法窗口高度（dp），**固定不变** = 候选栏 46 + 键盘 216 + 底部留白 56。
+         * 输入法窗口高度（dp），**默认** = 候选栏 46 + 键盘 216 + 底部留白 56。
+         *
+         * ⚠ **用户在键盘设置里调过键盘高度时，窗口高度跟着变**
+         * （见 applyWindowHeight）：窗口 = 候选栏 + 键盘 + 底部留白，
+         * 键盘那一块变了，另外两块不变。
          */
         const val IME_WINDOW_HEIGHT_DP = 318f
 
@@ -3800,6 +4159,14 @@ class ShuangpinImeService : InputMethodService() {
 
         /** 候选栏右端 ⌄ 箭头的宽度（dp）。 */
         const val ARROW_DP = 34f
+
+        /**
+         * 键盘顶部那颗 **⚙ 设置键**的宽度（dp）。
+         *
+         * 它在候选区左边；单手模式下贴在屏幕边，
+         * 正好落在常用标点竖列的顶端。
+         */
+        const val SETTINGS_BTN_DP = 36f
 
         /**
          * 选字面板「单字」页最多显示多少个字。

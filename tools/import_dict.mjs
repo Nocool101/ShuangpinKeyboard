@@ -100,9 +100,40 @@ if (traditionalSet.size) {
   console.log(`繁简表：${traditionalSet.size} 个繁体字将被过滤（${T2S_FILE}）`);
 }
 
+// ---------- 规范简体字（8105 字表） ----------
+//
+// 《通用规范汉字表》里的字**都是规范简体字**，不能当繁体字滤掉。
+//
+// 有 36 个字同时出现在繁简表和 8105 字表里（乾/覆/蒙/著/徵/於/車…）——
+// 它们是「**多义简繁同形字**」：繁简表里 乾→干（干燥义的繁体写法），
+// 但乾本身也是规范简体字（乾隆、乾坤），照着繁简表把它滤掉，
+// 这个字就**整个打不出来**（用户反馈「打不出来乾」）。
+//
+// 判据：**在 8105 字表里 = 规范简体字，繁简表怎么说都不算数**。
+const standardSet = new Set();
+{
+  const file = path.join(DICT_DIR, '8105.dict.yaml');
+  if (fs.existsSync(file)) {
+    const { texts } = readDict(file);
+    for (const t of texts) {
+      // 只收单字（词条是词，不是字）
+      if ([...t].length === 1) standardSet.add(t);
+    }
+    const kept = [...standardSet].filter((c) => traditionalSet.has(c));
+    console.log(
+      `规范简体字（8105 字表）：${standardSet.size} 个` +
+      (kept.length ? `，其中 ${kept.length} 个在繁简表里也出现过——按规范简体字保留：${kept.join('')}` : ''),
+    );
+  } else {
+    console.warn(`⚠ 找不到 8105 字表（${file}）——繁简表里同时是规范简体字的字会被误过滤。`);
+  }
+}
+
 /** 这段文字里有没有繁体字。 */
 function hasTraditionalChar(text) {
   for (const ch of text) {
+    // 8105 字表里的字是规范简体字，繁简表说它是繁体也不算数
+    if (standardSet.has(ch)) continue;
     if (traditionalSet.has(ch)) return true;
   }
   return false;

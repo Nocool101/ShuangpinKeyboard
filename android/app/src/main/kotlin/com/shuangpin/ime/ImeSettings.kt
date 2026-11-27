@@ -93,6 +93,29 @@ class ImeSettings(context: Context) {
         get() = prefs.getString(KEY_FINAL_ARRANGE, FINAL_ARRANGE_FIXED) ?: FINAL_ARRANGE_FIXED
         set(v) = prefs.edit().putString(KEY_FINAL_ARRANGE, v).apply()
 
+    /**
+     * **键盘高度**的倍数（1.0 = 标准 216 dp）。
+     *
+     * 在键盘上的「设置」面板里调，调完立刻生效。
+     *
+     * 为什么要能调：有人手机小、标准高度按着费劲；
+     * 也有人屏幕大、觉得键太小不够用。
+     * 键位坐标随高度重排，肌肉记忆那一次得重新适应——所以默认还是 1.0。
+     */
+    var kbHeightScale: Float
+        get() = prefs.getFloat(KEY_KB_HEIGHT_SCALE, 1f)
+        set(v) = prefs.edit().putFloat(KEY_KB_HEIGHT_SCALE, v.coerceIn(MIN_KB_HEIGHT_SCALE, MAX_KB_HEIGHT_SCALE)).apply()
+
+    /**
+     * **单手模式下键盘本体占屏宽的比例**（0.80 = 标准）。
+     *
+     * 只在单手模式（全键盘 / 单手右手 / 单手左手）有意义：
+     * 全键盘模式下键盘横跨整个屏宽，这个值不参与计算。
+     */
+    var kbWidthRatio: Float
+        get() = prefs.getFloat(KEY_KB_WIDTH_RATIO, DEFAULT_KB_WIDTH_RATIO)
+        set(v) = prefs.edit().putFloat(KEY_KB_WIDTH_RATIO, v.coerceIn(MIN_KB_WIDTH_RATIO, MAX_KB_WIDTH_RATIO)).apply()
+
     // ------------------------------------------------------------------
     // 端侧重排
     // ------------------------------------------------------------------
@@ -238,6 +261,30 @@ class ImeSettings(context: Context) {
         const val KEY_LAYOUT_LEFT = "left"
 
         const val KEY_FINAL_ARRANGE = "key.finalArrange"
+
+        /** 键盘高度倍数。 */
+        const val KEY_KB_HEIGHT_SCALE = "key.heightScale"
+
+        /** 单手模式键盘宽度比例。 */
+        const val KEY_KB_WIDTH_RATIO = "key.widthRatio"
+
+        /** 键盘高度倍数的默认值（1.0 = 标准高度）。 */
+        const val DEFAULT_KB_HEIGHT_SCALE = 1f
+
+        /** 键盘高度倍数的下限（0.7 = 矮一点，拇指不用挪那么远）。 */
+        const val MIN_KB_HEIGHT_SCALE = 0.7f
+
+        /** 键盘高度倍数的上限（1.4 = 高一点，键大）。 */
+        const val MAX_KB_HEIGHT_SCALE = 1.4f
+
+        /** 单手模式宽度比例的默认值（跟键盘里的标准值一致）。 */
+        const val DEFAULT_KB_WIDTH_RATIO = 0.80f
+
+        /** 单手模式宽度比例的下限。 */
+        const val MIN_KB_WIDTH_RATIO = 0.50f
+
+        /** 单手模式宽度比例的上限。 */
+        const val MAX_KB_WIDTH_RATIO = 1.0f
 
         /** 韵母位固定在小鹤标准键位（默认）。 */
         const val FINAL_ARRANGE_FIXED = "fixed"

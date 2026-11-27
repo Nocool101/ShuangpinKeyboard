@@ -225,6 +225,22 @@ class CandidatePanel(context: Context) : LinearLayout(context) {
         renderItems()
     }
 
+    /**
+     * 把两个滚动容器都拉回最上面。
+     *
+     * **打开面板时必须调它**：候选字列表的内容跟上一次一模一样时，
+     * [renderItems] 会直接跳过重建（「内容没变就别重建」省掉几百个 TextView），
+     * 滚动位置也就留在上一轮滑到的地方。
+     *
+     * 表现就是：打「long」滑到第二页挑了个「陇」，
+     * 下一轮再打「long」，面板还是停在那页（用户反馈
+     * 「打陇在第二页，下次再打龙不会在第一页，而是还停留在陇的那一页」）。
+     */
+    fun resetScroll() {
+        itemScroll.scrollTo(0, 0)
+        segmentScroll?.scrollTo(0, 0)
+    }
+
     private fun renderHeader() {
         // 顶栏：左边是这一轮拼音，右边带出已经选好的字
         val chosen = picked.mapIndexed { i, c ->

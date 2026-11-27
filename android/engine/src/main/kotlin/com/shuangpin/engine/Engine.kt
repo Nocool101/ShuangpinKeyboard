@@ -226,6 +226,29 @@ enum class CandidateKind {
     /** 词候选：整串命中、分出来的词 */
     WORD,
 
+    /**
+     * **分组候选**：某一组音节能打出来的**词**。
+     *
+     * 打一长串拼音（「北风卷地白草折」= bei feng juan di bai cao zhe）时，
+     * 整句只是**一种**可能。用户真正要挑的是「北风」那一段——
+     * 它能换成什么，得摆在**它那一组的位置**上，
+     * 否则一路翻到后面全是「白草折」的备选，前面的词没处挑
+     * （用户反馈「滑动选词要从前面选起」）。
+     *
+     * 候选栏于是按组往后排：
+     *
+     * ```
+     *   北风卷地白草折          ← 整句
+     *   北风 被封 背风 …        ← 第一组（beifeng）的词
+     *   背 杯 被 北 风 封 丰    ← 第一组的字
+     *   卷地 涓滴 …             ← 第二组（juandi）的词
+     *   …
+     * ```
+     *
+     * 组内**词优先**：词比字准，先给词再给字。
+     */
+    GROUP,
+
     /** 长词扩展（联想）：词库里有、但没被分词选中的更长词 */
     EXTENSION,
 
@@ -320,6 +343,28 @@ data class Candidate(
      * 模型没见过这个词，让模型排就等于把它排到后面去。
      */
     val context: Boolean = false,
+    /**
+     * **分组候选**：它属于第几组（0 起）。-1 = 不分组。
+     *
+     * 候选栏按这个分组画分隔线——用户一眼看得出
+     * 「这批是「北风」那组的，下一批是「卷地」那组的」。
+     */
+    val group: Int = -1,
+    /**
+     * **分组候选**：上屏时要**一起带上的前缀文字**（前面几组的默认文字）。
+     *
+     * 用户直接点第二组的词时，第一组还没挑过——
+     * 得用它的默认文字（分词结果里的那个词）垫上，
+     * 否则上屏出来是「卷地」，前面少一截。
+     */
+    val prefix: String = "",
+    /**
+     * **分组候选**：这一条吃掉**几个音节**。
+     *
+     * 剩下的拼音留在会话里继续选（见 [InputSession.commitPrefix]）。
+     * 0 = 不是分组候选（整条上屏）。
+     */
+    val consumed: Int = 0,
 )
 
 /**
@@ -353,6 +398,14 @@ object Candidates {
      * 两个音节各 12 个正好；音节更多时每个音节分到 4~8 个。
      */
     const val MAX_CHAR = 24
+
+    /**
+     * 一组里最多给几个**词**。
+     *
+     * 词库里的同音词其实不多（「beifeng」7 个），给多了全是冷门词。
+     * 6 个够用户挑的了。
+     */
+    const val MAX_GROUP_WORD = 6
 
     /**
      * 整句的备选切分给几个。
@@ -391,14 +444,19 @@ object Candidates {
     /**
      * 装配候选栏内容。
      *
-     * 顺序：**用户自学习词 →（条件）自动纠错 → 整串命中 → 整句 → 备选整句 → 分出来的词 → 长词扩展 → 单字**。
+     * 顺序：**用户自学习词 →（条件）自动纠错 → 整串命中 → 整句
+     * → 分组候选（组1的词 → 组1的字 → 组2的词 → 组2的字 → …）
+     * → 备选整句 → 整串其它命中 → 分出来的词 → 长词扩展**。
      *
      * 用户自学习词排最前：那是用户**明确打出来过**的东西，
      * 没有任何候选比它更贴近用户此刻的意图。
      *
      * 自动纠错**可能**插到整串命中前面——条件见 [HOIST_MAX_SCORE]。
      *
-     * 扩展排在单字前面：它比单字精确得多，单字是最不靠谱的兜底。
+     * **分组候选紧跟在整句后面**：用户往右滑第一下就该看到
+     * 「北风」那组能挑什么，而不是先翻过一堆备选整句
+     * （用户反馈「滑动选词要从前面选起」）。
+     * 组内词优先：词比字准。
      *
      * @param includeCorrections 是否带上「自动纠错」候选。
      *        **默认关**——端侧模型评估用的候选池必须是固定的，
@@ -411,6 +469,8 @@ object Candidates {
      * 这两个参数用来做**跨界组合**：上一块「结」（jie）+ 这一轮「guo」，
      * 在词库里正好是「结果」——于是这一轮该给的是「果」，不是词频最高的「过」。
      * 详见 [Context]。
+     *
+     * @param maxGroupWord 一组里最多给几个词（见 [MAX_GROUP_WORD]）。
      */
     fun build(
         engine: PinyinEngine,
@@ -418,6 +478,7 @@ object Candidates {
         maxPhrase: Int = MAX_PHRASE,
         maxExtension: Int = MAX_EXTENSION,
         maxChar: Int = MAX_CHAR,
+        maxGroupWord: Int = MAX_GROUP_WORD,
         includeCorrections: Boolean = false,
         userDict: UserDict? = engine.userDict,
         contextPinyin: String? = null,
@@ -428,11 +489,22 @@ object Candidates {
         // 去重：整句、词、扩展、单字四层经常重叠
         // （比如整句就是"你"，字表第一位也是"你"）
         val seen = HashSet<String>()
+        // 词库是 @Volatile 的，中间换库就地对不上了——一次查拿齐。
+        val dictionary = engine.dictionary
+
         // ⓪ 用户自学习词：用户打过的词排最前。
         // 词库里没有的词（「炼气士」）也能进候选栏——这正是自学习词库的意义。
         if (userDict != null) {
+            // **跟词库里一模一样的条目不算数**。
+            //
+            // 那条是「学整句」时顺手记下来的（跟词库重复，白占位置），
+            // 而且按「打得多的在前」排序时，它会压过用户**自己挑**的那个用法——
+            // 用户从候选栏里挑了「北风卷地百草折」，下次打同样的拼音，
+            // 第一个候选却是词库里的「北风卷地白草折」（用户反馈）。
+            val dictText = dictionary.phrases.top(session.pinyin)?.text
             for (entry in userDict.lookup(session.pinyin)) {
                 if (entry.word.isEmpty()) continue
+                if (entry.word == dictText) continue
                 if (seen.add(entry.word)) out += Candidate(entry.word, CandidateKind.USER)
             }
         }
@@ -450,7 +522,6 @@ object Candidates {
         //    所以纠错候选可以顶到它前面——条件见 [HOIST_MAX_SCORE]。
         //
         //    一次查拿齐文本和分数（词库是 @Volatile 的，中间换库就地对不上了）。
-        val dictionary = engine.dictionary
         val exactCand = dictionary.phrases.top(session.pinyin)
         val exactText = exactCand?.text
         val exactScore = exactCand?.score ?: 0
@@ -497,48 +568,94 @@ object Candidates {
             out += Candidate(sentence, CandidateKind.SENTENCE)
         }
 
-        // ③ 整句的备选切分（等长候选）——重排模型能发挥的地方
+        // ③ **分组候选**：按音节分组，一组一组往后排。
+        //
+        // 「北风卷地白草折」（bei feng juan di bai cao zhe）这种长句，
+        // 整句只是**一种**可能。用户要挑的是「北风」那一段——
+        // 它能换成什么，得摆在**它那一组的位置**上，
+        // 否则一路翻到后面全是「白草折」的备选，前面的词没处挑
+        // （用户反馈「滑动选词要从前面选起」）。
+        //
+        // 组内**词优先**：词比字准，先给词再给字。
+        //
+        // 分组 = 分词结果（[SegmentUnit]）：「bei feng」一组、「juan di」一组。
+        // 每组给：这一组拼音串在词库里的命中（+ 分词结果本身），然后是组里每个音节的字。
+        val groups = engine.segmentGroups(session.pending.map { it.syllable ?: "" })
+        if (groups.isNotEmpty()) {
+            // 每个音节分到几个字：总数摊平，谁也不挨饿
+            // （以前是「最后一个音节的字排前面」，前面的音节分不到——
+            //   现在按组从前往后排，谁也不该挨饿。）
+            val syllableCount = groups.sumOf { it.syllables.size }.coerceAtLeast(1)
+            val perSyllable = (maxChar / syllableCount).coerceAtLeast(1)
+            var charCount = 0
+            for ((gi, g) in groups.withIndex()) {
+                val groupEnd = g.start + g.syllables.size
+                val groupPrefix = defaultPrefix(groups, g.start) { syl ->
+                    engine.candidateCharList(syl).firstOrNull().orEmpty()
+                }
+
+                // 这一组的**词**：分词结果本身 + 词库里这一串拼音的其它命中
+                var wordCount = 0
+                val groupWords = ArrayList<String>()
+                groupWords += g.word
+                groupWords += engine.phraseCandidates(g.syllables.joinToString(""))
+                for (w in groupWords) {
+                    if (w.isEmpty() || wordCount >= maxGroupWord) continue
+                    if (!seen.add(w)) continue
+                    out += Candidate(
+                        text = w,
+                        kind = CandidateKind.GROUP,
+                        group = gi,
+                        prefix = groupPrefix,
+                        consumed = groupEnd,
+                    )
+                    wordCount++
+                }
+
+                // 这一组的**字**：组里每个音节的候选字
+                for ((si, syl) in g.syllables.withIndex()) {
+                    if (syl.isEmpty()) continue
+                    val sylIndex = g.start + si
+                    var taken = 0
+                    for (s in engine.candidateCharList(syl)) {
+                        if (charCount >= maxChar || taken >= perSyllable) break
+                        if (!seen.add(s)) continue
+                        out += Candidate(
+                            text = s,
+                            kind = CandidateKind.CHAR,
+                            pinyin = syl,
+                            group = gi,
+                            // 这个字前面那几个音节的默认文字
+                            prefix = defaultPrefix(groups, sylIndex) { s2 ->
+                                engine.candidateCharList(s2).firstOrNull().orEmpty()
+                            },
+                            consumed = sylIndex + 1,
+                        )
+                        charCount++
+                        taken++
+                    }
+                }
+            }
+        }
+
+        // ④ 整句的备选切分（等长候选）——重排模型能发挥的地方
         for (alt in session.alternativeSentences) {
             if (seen.add(alt)) out += Candidate(alt, CandidateKind.SENTENCE_ALT)
         }
 
-        // ④ 整串在词库里的其它命中
+        // ⑤ 整串在词库里的其它命中
         for (word in session.phraseCandidates.take(maxPhrase)) {
             if (seen.add(word)) out += Candidate(word, CandidateKind.WORD)
         }
 
-        // ⑤ 分出来的各个词
+        // ⑥ 分出来的各个词
         for (word in session.segmentWords.take(maxPhrase)) {
             if (seen.add(word)) out += Candidate(word, CandidateKind.WORD)
         }
 
-        // ⑥ 长词扩展（联想）：「你好」之外再给「你好吗」「你好啊」
+        // ⑦ 长词扩展（联想）：「你好」之外再给「你好吗」「你好啊」
         for (cand in engine.extensions(session.pinyin, maxExtension)) {
             if (seen.add(cand.text)) out += Candidate(cand.text, CandidateKind.EXTENSION)
-        }
-
-        // ⑦ 单字（限流：候选字有一大堆生僻字，全放进来会把候选栏撑爆）
-        //
-        // **每个音节的字都给**，不只是最后一个音节——
-        // 用户反馈「多个字或者句子，右划选词区要能从前选择」：
-        // 原来只给最后一个音节的字，前面那些音节根本改不了。
-        // 最后一个音节的字排前面（最常要改的就是它），前面的音节往后排，
-        // 往右划就能选到。每个字都带着**自己那个音节的拼音**（角标上显示），
-        // 点角标就能单独改那个音节。
-        var charCount = 0
-        val charSyllables = session.pending.map { it.syllable ?: "" }.reversed()
-        // 每个音节至少 4 个字（不然多音节时一个都挑不到），再多就按总数平分
-        val perSyllable = maxOf(4, maxChar / charSyllables.size.coerceAtLeast(1))
-        for (syl in charSyllables) {
-            if (syl.isEmpty()) continue
-            var taken = 0
-            for (s in engine.candidateCharList(syl)) {
-                if (charCount >= maxChar || taken >= perSyllable) break
-                if (!seen.add(s)) continue
-                out += Candidate(s, CandidateKind.CHAR, pinyin = syl)
-                charCount++
-                taken++
-            }
         }
 
         // ⑧ **上下文选词**（跨界组合）：上一块 + 当前拼音在词库里是一个词
@@ -563,6 +680,40 @@ object Candidates {
             }
         }
         return out
+    }
+
+    /**
+     * 前 [count] 个音节的「默认文字」。
+     *
+     * 整组取分词结果里的那个词（北风），半组取每个音节的最高频字。
+     *
+     * 为什么需要它：用户在候选栏里点**第二组**的词时，第一组还没挑过——
+     * 得用它的默认文字垫上，否则上屏出来是「卷地」，前面少一截。
+     *
+     * @param defaultChar 某个音节的默认字（拿不到就是空串）。
+     */
+    private fun defaultPrefix(
+        groups: List<WordSpan>,
+        count: Int,
+        defaultChar: (String) -> String,
+    ): String {
+        if (count <= 0) return ""
+        val sb = StringBuilder()
+        for (g in groups) {
+            val end = g.start + g.syllables.size
+            if (g.start >= count) break
+            val take = (count - g.start).coerceAtMost(g.syllables.size)
+            if (take <= 0) continue
+            if (take == g.syllables.size && g.word.length == g.syllables.size) {
+                // 整组：取分词结果里的那个词（比逐字拼更像用户要的）
+                sb.append(g.word)
+            } else {
+                // 半组：逐音节取最高频字
+                for (i in 0 until take) sb.append(defaultChar(g.syllables[i]))
+            }
+            if (end >= count) break
+        }
+        return sb.toString()
     }
 
     /**
@@ -847,8 +998,8 @@ class PinyinEngine(
      * 逐词纠错要拿这个词的音节单独去纠（见 [Candidates]），
      * 提交前缀要知道这个词覆盖了几个音节（见 [InputSession.commitPrefix]）。
      */
-    fun segmentUnitSpans(syllables: List<String>): List<SegmentUnit> {
-        val path = segmentPaths(syllables, 1).firstOrNull() ?: return emptyList()
+    fun segmentUnitSpans(syllables: List<String>, maxWordSyllables: Int = Int.MAX_VALUE): List<SegmentUnit> {
+        val path = segmentPaths(syllables, 1, maxWordSyllables).firstOrNull() ?: return emptyList()
         val out = ArrayList<SegmentUnit>()
         var idx = 0
         for (i in path.words.indices) {
@@ -870,6 +1021,50 @@ class PinyinEngine(
     }
 
     /**
+     * **分组用的切分**：把音节序列切成「一段一个词」的组。
+     *
+     * 跟 [segmentUnitSpans] 的区别：**每个词最多 [GROUP_MAX_WORD_SYLLABLES] 个音节**。
+     *
+     * ## 为什么分组要另切一遍
+     *
+     * 长句在词库里常常有整句的词条——「北风卷地白草折」就是一个。
+     * 组句的 DP 偏好**少切几个词**（每个词罚 120 分），于是整句成了一个词，
+     * 分组就退化成**一组**——候选栏里除了整句还是整句，
+     * 用户想改「北风」那一段都改不了（用户反馈「滑动选词要从前面选起」）。
+     *
+     * 限了词长之后，它会切成 北风 | 卷地 | 白草 | 折 这样一组一组，
+     * 用户就能从前往后一段一段挑。
+     *
+     * 4 个音节是折中：成语、诗句大多在 4 个以内，
+     * 再长的（7 个音节的一整句）就该切开看了。
+     */
+    fun segmentGroups(syllables: List<String>): List<WordSpan> {
+        val spans = segmentWordSpans(syllables, GROUP_MAX_WORD_SYLLABLES)
+        val out = ArrayList<WordSpan>()
+        for (span in spans) {
+            if (span.word.length == span.count) {
+                // 一个词 = 一组
+                out += span
+            } else {
+                // 字数跟音节数对不上（词库里有「西安」这种一个音节两个字的词条）
+                // → 这一段按音节拆开：组只是「一段一起给候选」，
+                //   拆成单音节组，用户照样能逐个字挑。
+                for ((i, syl) in span.syllables.withIndex()) {
+                    out += WordSpan(
+                        word = candidateCharList(syl).firstOrNull().orEmpty(),
+                        syllables = listOf(syl),
+                        start = span.start + i,
+                        count = 1,
+                        score = 0,
+                        edgeScore = 0,
+                    )
+                }
+            }
+        }
+        return out
+    }
+
+    /**
      * 分词结果，**带上每个词在 DP 里的贡献分**。
      *
      * 跟 [segmentUnitSpans] 的区别：
@@ -878,8 +1073,11 @@ class PinyinEngine(
      * - 多了 [WordSpan.edgeScore]：这个词在 DP 里贡献了多少分，
      *   长句纠错要靠它判断「纠正之后是不是真的更好了」。
      */
-    fun segmentWordSpans(syllables: List<String>): List<WordSpan> {
-        val path = segmentPaths(syllables, 1).firstOrNull() ?: return emptyList()
+    fun segmentWordSpans(
+        syllables: List<String>,
+        maxWordSyllables: Int = Int.MAX_VALUE,
+    ): List<WordSpan> {
+        val path = segmentPaths(syllables, 1, maxWordSyllables).firstOrNull() ?: return emptyList()
         val out = ArrayList<WordSpan>()
         var idx = 0
         for (i in path.words.indices) {
@@ -944,7 +1142,11 @@ class PinyinEngine(
      * 同分时保持到达顺序（稳定排序），与原来单最优 DP 的并列处理一致——
      * 所以 [segmentWords] 的结果不变。
      */
-    private fun segmentPaths(syllables: List<String>, limit: Int): List<Path> {
+    private fun segmentPaths(
+        syllables: List<String>,
+        limit: Int,
+        maxWordSyllables: Int = Int.MAX_VALUE,
+    ): List<Path> {
         val n = syllables.size
         if (n == 0 || limit <= 0) return emptyList()
 
@@ -955,6 +1157,8 @@ class PinyinEngine(
         for (j in 1..n) {
             val bucket = ArrayList<Path>()
             for (i in 0 until j) {
+                // 词长上限：分组切分时用它把「整句一个词」这种退化切法挡掉
+                if (j - i > maxWordSyllables) continue
                 val prev = best[i] ?: continue
                 val key = syllables.subList(i, j).joinToString("")
                 val cand = candidateFor(key, j - i == 1) ?: continue
@@ -993,6 +1197,15 @@ class PinyinEngine(
     companion object {
         /** 长词每多覆盖一个音节额外加分，鼓励组成词而不是逐字切。 */
         const val LONG_BONUS = 10
+
+        /**
+         * **分组切分**时，一个词最多几个音节。
+         *
+         * 组句的 DP 偏好少切词（每个词罚 120 分），长句在词库里又有整句的词条，
+         * 于是「北风卷地白草折」会被当成**一个**词——分组就退化成一组，
+         * 用户没法一段一段挑。限了词长，它才会切成 北风 | 卷地 | 白草 | 折。
+         */
+        const val GROUP_MAX_WORD_SYLLABLES = 4
 
         /** 每个词的罚分 discouraging 过度切分。参数由 tools/segment_eval.mjs 网格搜出来。 */
         const val WORD_PENALTY = 120
@@ -1090,6 +1303,26 @@ class InputSession(private val engine: PinyinEngine) {
      */
     var caret: Int = 0
         private set
+
+    /**
+     * 本轮**已经提交掉**的部分。
+     *
+     * 分组选择是**一段一段提交**的：选完「北风」提交一次，
+     * 「卷地」再提交一次……每段提交只知道自己那一段。
+     * 攒起来的整句得在这儿记着——
+     * 不然学到词库里的只有「北风」「卷地」两个碎片，
+     * 整句「北风卷地百草折」没人记得，
+     * 下次打同样的拼音，候选第一个还是词库里的「北风卷地白草折」
+     * （用户反馈）。
+     */
+    private val committedSyllables = ArrayList<String>()
+    private val committedText = StringBuilder()
+
+    /** 本轮已提交部分的音节（分组选择攒整句时用）。 */
+    val roundCommittedSyllables: List<String> get() = committedSyllables
+
+    /** 本轮已提交部分的文字（分组选择攒整句时用）。 */
+    val roundCommittedText: String get() = committedText.toString()
 
     /** 已上屏文本。 */
     var committed: String = ""
@@ -1463,6 +1696,9 @@ class InputSession(private val engine: PinyinEngine) {
     /** 提交任意文本（候选栏点词时用）。 */
     fun commitText(text: String): String {
         committed += text
+        // 整轮提交完了：本轮的累加器作废
+        committedSyllables.clear()
+        committedText.clear()
         reset()
         return text
     }
@@ -1488,6 +1724,11 @@ class InputSession(private val engine: PinyinEngine) {
     fun commitPrefix(text: String, consumed: Int): String {
         committed += text
         if (consumed > 0 && consumed <= pending.size) {
+            // 这一段的音节和文字都记下来——分组选择靠它攒出整句
+            committedSyllables.addAll(
+                pending.subList(0, consumed).map { it.syllable ?: "" },
+            )
+            committedText.append(text)
             pending.subList(0, consumed).clear()
             insertAt = (insertAt - consumed).coerceIn(0, pending.size)
         }
@@ -1538,6 +1779,8 @@ class InputSession(private val engine: PinyinEngine) {
     fun clear() {
         reset()
         committed = ""
+        committedSyllables.clear()
+        committedText.clear()
     }
 
     /**
