@@ -211,7 +211,7 @@ iu   ei    e er/uan üe un/ün  u    i    o    ie      ← 灰
 
 ## 装
 
-Releases 里有打包好的 APK（[v0.0.2](https://github.com/Nocool101/ShuangpinKeyboard/releases)），也可以自己编。
+Releases 里有打包好的 APK（[v0.0.4](https://github.com/Nocool101/ShuangpinKeyboard/releases)），也可以自己编。
 
 ```powershell
 adb install -r app-debug.apk
